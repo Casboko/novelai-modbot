@@ -1,0 +1,23 @@
+# Python virtual environment
+.venv/
+
+# Runtime artifacts
+__pycache__/
+*.pyc
+
+# Local environment and secrets
+.env
+.env.*
+
+# Scanner outputs
+out/
+
+# Model cache (tracked via gitkeep only)
+models/**
+!models/
+!models/.gitkeep
+!models/**/.gitkeep
+
+# Editor settings
+.vscode/
+.idea/

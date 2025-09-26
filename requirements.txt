@@ -1,0 +1,9 @@
+discord.py>=2.4
+Pillow
+imagehash
+numpy
+onnxruntime
+nudenet
+python-dotenv
+pydantic
+pydantic-settings
