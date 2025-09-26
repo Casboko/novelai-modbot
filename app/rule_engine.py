@@ -6,6 +6,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 import yaml
 
 DEFAULT_SEVERITY = "green"
+KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
+
+
+def _normalize_tag(name: str) -> str:
+    value = str(name)
+    if value in KEEP_UNDERSCORE:
+        return value
+    return value.replace("_", " ")
 
 
 @dataclass(slots=True)
@@ -38,13 +46,15 @@ class RuleEngine:
     def _load_config(path: str) -> RuleConfig:
         with open(path, "r", encoding="utf-8") as fp:
             data = yaml.safe_load(fp)
+        def normalize_list(items: Iterable[str]) -> List[str]:
+            return [_normalize_tag(item) for item in items if isinstance(item, str)]
         return RuleConfig(
             wd14_repo=data.get("models", {}).get("wd14_repo", ""),
             thresholds=data.get("thresholds", {}),
-            minor_tags=data.get("minor_tags", []),
-            violence_tags=data.get("violence_tags", []),
-            nsfw_tags=data.get("nsfw_general_tags", []),
-            animal_tags=data.get("animal_abuse_tags", []),
+            minor_tags=normalize_list(data.get("minor_tags", [])),
+            violence_tags=normalize_list(data.get("violence_tags", [])),
+            nsfw_tags=normalize_list(data.get("nsfw_general_tags", [])),
+            animal_tags=normalize_list(data.get("animal_abuse_tags", [])),
             xsignal_weights=data.get("xsignals_weights", {}),
             rule_titles=data.get("rule_titles", {}),
         )
@@ -169,10 +179,11 @@ class RuleEngine:
 
     @staticmethod
     def _max_exposed_detection(nudity: Iterable[Mapping[str, Any]]) -> float:
+        """Expose variants include FEMALE_BREAST_EXPOSED / EXPOSED_BREAST_F etc."""
         max_score = 0.0
         for det in nudity or []:
-            label = det.get("class", "") or ""
-            if label.startswith("EXPOSED_"):
+            label = str(det.get("class", "") or "").upper()
+            if "EXPOSED" in label and "COVERED" not in label:
                 score = float(det.get("score", 0.0))
                 if score > max_score:
                     max_score = score

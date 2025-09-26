@@ -4,13 +4,13 @@ import argparse
 import asyncio
 import csv
 import json
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
 
 from PIL import Image
+import yaml
 
 from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
 from .batch_loader import ImageLoadResult, ImageRequest, load_images
@@ -26,6 +26,31 @@ class Entry:
     rows: list[dict[str, str]]
 
 
+KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
+
+
+def normalize_tag_name(tag: str) -> str:
+    name = str(tag)
+    if name in KEEP_UNDERSCORE:
+        return name
+    return name.replace("_", " ")
+
+
+def load_rules_nsfw_tags(path: Path) -> set[str]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except yaml.YAMLError:
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    tags = data.get("nsfw_general_tags", [])
+    if not isinstance(tags, list):
+        return set()
+    return {normalize_tag_name(tag) for tag in tags if isinstance(tag, str)}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WD14 EVA02 batch inference")
     parser.add_argument("--input", type=Path, default=Path("out/p0_scan.csv"))
@@ -38,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--general-threshold", type=float, default=0.35)
     parser.add_argument("--character-threshold", type=float, default=0.85)
+    parser.add_argument("--raw-general-topk", type=int, default=64)
+    parser.add_argument("--rules-config", type=Path, default=Path("configs/rules.yaml"))
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--qps", type=float, default=5.0)
@@ -114,6 +141,7 @@ def build_payload(
         "input_size": input_size,
         "rating": prediction.rating,
         "general": prediction.general,
+        "general_raw": prediction.general_raw,
         "character": prediction.character,
         "raw": prediction.raw_scores.tolist(),
     }
@@ -125,6 +153,7 @@ async def run() -> None:
     if not entries:
         raise SystemExit("No entries found in CSV. Did you run p0 scan?")
 
+    nsfw_whitelist = load_rules_nsfw_tags(args.rules_config)
     label_csv, model_path = ensure_local_files(repo_id=args.model_id)
     labelspace = load_labelspace(label_csv)
     session = WD14Session(model_path, provider=args.provider, threads=args.threads)
@@ -133,6 +162,8 @@ async def run() -> None:
         labelspace,
         general_threshold=args.general_threshold,
         character_threshold=args.character_threshold,
+        raw_general_topk=args.raw_general_topk,
+        raw_general_whitelist=nsfw_whitelist,
     )
 
     cache = WD14Cache(Path(args.cache))
@@ -147,6 +178,12 @@ async def run() -> None:
         cached = cache.get(key)
         if cached is not None:
             cache_hits += 1
+            if "general_raw" not in cached:
+                raw_scores = cached.get("raw")
+                if isinstance(raw_scores, list) and raw_scores:
+                    cached_general_raw = analyzer.general_raw_from_scores(raw_scores)
+                    cached["general_raw"] = cached_general_raw
+                    cache.set(key, cached)
             cache_key_map[phash] = cached
 
     missing = [phash for phash in all_phashes if phash not in cache_key_map]

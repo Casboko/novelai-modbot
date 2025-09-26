@@ -14,6 +14,7 @@ from .labelspace import LabelSpace
 class WD14Prediction:
     rating: dict[str, float]
     general: list[tuple[str, float]]
+    general_raw: list[tuple[str, float]]
     character: list[tuple[str, float]]
     raw_scores: np.ndarray
 
@@ -94,11 +95,20 @@ class WD14Analyzer:
         *,
         general_threshold: float = 0.35,
         character_threshold: float = 0.85,
+        raw_general_topk: int = 64,
+        raw_general_whitelist: Iterable[str] | None = None,
     ) -> None:
         self.session = session
         self.labelspace = labelspace
         self.general_threshold = general_threshold
         self.character_threshold = character_threshold
+        self.raw_general_topk = max(1, int(raw_general_topk))
+        self.raw_general_whitelist = {
+            tag for tag in (raw_general_whitelist or []) if isinstance(tag, str)
+        }
+        self._general_index_names = [
+            (idx, self.labelspace.names[idx]) for idx in self.labelspace.general_indices
+        ]
 
     def predict(self, images: Sequence[Image.Image]) -> list[WD14Prediction]:
         scores = self.session.infer(images)
@@ -121,15 +131,34 @@ class WD14Analyzer:
                 self.labelspace.names,
                 self.character_threshold,
             )
+            general_raw = self._build_general_raw(row)
             results.append(
                 WD14Prediction(
                     rating=rating,
                     general=general,
+                    general_raw=general_raw,
                     character=character,
                     raw_scores=row,
                 )
             )
         return results
+
+    def _build_general_raw(self, row: np.ndarray) -> list[tuple[str, float]]:
+        if not self._general_index_names:
+            return []
+        pairs = [(name, float(row[idx])) for idx, name in self._general_index_names]
+        sorted_pairs = sorted(pairs, key=lambda item: item[1], reverse=True)
+        keep = set(self.raw_general_whitelist)
+        keep.update(name for name, _ in sorted_pairs[: self.raw_general_topk])
+        filtered = [(name, score) for name, score in pairs if name in keep]
+        filtered.sort(key=lambda item: item[1], reverse=True)
+        return filtered
+
+    def general_raw_from_scores(self, scores: Sequence[float]) -> list[tuple[str, float]]:
+        if not scores:
+            return []
+        arr = np.asarray(scores, dtype=np.float32)
+        return self._build_general_raw(arr)
 
 
 def _collect_scores(
