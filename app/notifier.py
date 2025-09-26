@@ -18,7 +18,8 @@ def build_notification_content(decision: RuleDecision, message_link: str, author
     settings = get_settings()
     due = build_due_timestamp(settings.due_hours)
     return (
-        f"{author.mention} This post may violate the server rules."
-        f" Please review: {message_link}\n"
-        f"Deadline: {due:%Y-%m-%d %H:%M} JST"
+        f"{author.mention} この投稿はDiscordガイドラインに抵触している可能性があります。\n"
+        "お手数ですが、内容をご確認のうえ削除をお願いします。\n"
+        f"対象: {message_link}\n"
+        f"対応期限: {due:%Y-%m-%d %H:%M} JST"
     )
