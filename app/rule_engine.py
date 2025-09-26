@@ -5,6 +5,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import yaml
 
+DEFAULT_SEVERITY = "green"
+
 
 @dataclass(slots=True)
 class RuleConfig:
@@ -13,16 +15,18 @@ class RuleConfig:
     minor_tags: List[str]
     violence_tags: List[str]
     nsfw_tags: List[str]
+    animal_tags: List[str]
     xsignal_weights: Dict[str, float]
+    rule_titles: Dict[str, str]
 
 
 @dataclass(slots=True)
 class EvaluationResult:
     severity: str
+    rule_id: Optional[str]
+    rule_title: Optional[str]
     reasons: List[str]
-
-
-DEFAULT_SEVERITY = "green"
+    metrics: Dict[str, float]
 
 
 class RuleEngine:
@@ -40,84 +44,117 @@ class RuleEngine:
             minor_tags=data.get("minor_tags", []),
             violence_tags=data.get("violence_tags", []),
             nsfw_tags=data.get("nsfw_general_tags", []),
+            animal_tags=data.get("animal_abuse_tags", []),
             xsignal_weights=data.get("xsignals_weights", {}),
+            rule_titles=data.get("rule_titles", {}),
         )
 
     def evaluate(self, analysis: Mapping[str, Any]) -> EvaluationResult:
-        reasons: List[str] = []
-
         wd14 = analysis.get("wd14", {})
         rating = wd14.get("rating", {})
         general_tags = wd14.get("general", [])
+        general_map = {tag: score for tag, score in self._iter_general_tags(general_tags)}
         xsignals = analysis.get("xsignals", {})
         nudity = analysis.get("nudity_detections", [])
-        is_nsfw_channel = analysis.get("is_nsfw_channel")
+        is_nsfw_channel = bool(analysis.get("is_nsfw_channel"))
 
         thresholds = self.config.thresholds
 
-        # RED: Violence/Gore
-        gore_scores = [
-            float(score)
-            for tag, score in self._iter_general_tags(general_tags)
-            if tag in self.config.violence_tags
-        ]
-        if gore_scores:
-            max_gore = max(gore_scores)
-            sum_gore = sum(gore_scores)
-            if max_gore >= thresholds.get("gore_any", 0.3):
-                reasons.append(f"gore_any={max_gore:.2f}")
-            if sum_gore >= thresholds.get("gore_sum", 0.4):
-                reasons.append(f"gore_sum={sum_gore:.2f}")
-            if reasons:
-                return EvaluationResult("red", reasons)
-
-        # RED: minors sum
-        minor_scores = [
-            float(score)
-            for tag, score in self._iter_general_tags(general_tags)
-            if tag in self.config.minor_tags
-        ]
-        if minor_scores:
-            minors_sum = sum(minor_scores)
-            if minors_sum >= thresholds.get("wd14_minors_sum", 0.4):
-                reasons.append(f"minors_sum={minors_sum:.2f}")
-                return EvaluationResult("red", reasons)
-
-        # ORANGE: adult content outside NSFW channels
         questionable = float(rating.get("questionable", 0.0))
         explicit = float(rating.get("explicit", 0.0))
+        general_rating = float(rating.get("general", 0.0))
+        sensitive_rating = float(rating.get("sensitive", 0.0))
         exposure_score = float(xsignals.get("exposure_score", 0.0))
         placement_risk = float(xsignals.get("placement_risk_pre", 0.0))
 
-        exposure_threshold = thresholds.get("exposure_strong", 0.6)
-        placement_threshold = thresholds.get("exposure_risk", 0.6)
+        nsfw_general_sum = sum(float(general_map.get(tag, 0.0)) for tag in self.config.nsfw_tags)
+        nsfw_margin = max(questionable, explicit) - max(general_rating, sensitive_rating)
+        rating_total = questionable + explicit + general_rating + sensitive_rating + 1e-6
+        nsfw_ratio = (questionable + explicit) / rating_total
 
-        adult_flag = (
-            questionable >= thresholds.get("wd14_questionable", 0.35)
-            or explicit >= thresholds.get("wd14_explicit", 0.2)
-            or exposure_score >= exposure_threshold
-        )
+        violence_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.violence_tags]
+        violence_max = max(violence_scores) if violence_scores else 0.0
+        violence_sum = sum(violence_scores)
 
-        if adult_flag and (is_nsfw_channel is False):
-            reasons.append(
-                f"adult_content=questionable:{questionable:.2f},explicit:{explicit:.2f},exposure:{exposure_score:.2f}"
-            )
-            return EvaluationResult("orange", reasons)
+        minor_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.minor_tags]
+        minors_sum = sum(minor_scores)
+        minors_peak = max(minor_scores) if minor_scores else 0.0
 
-        # YELLOW: weak minors hint + exposure
-        if minor_scores:
-            minors_peak = max(minor_scores)
-            if minors_peak >= thresholds.get("yellow_minor_hint", 0.2) or exposure_score > 0:
-                reasons.append(f"minor_hint={minors_peak:.2f}")
-                if exposure_score > 0:
-                    reasons.append(f"exposure={exposure_score:.2f}")
-                return EvaluationResult("yellow", reasons)
+        animal_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.animal_tags]
+        animals_sum = sum(animal_scores)
+        animals_max = max(animal_scores) if animal_scores else 0.0
 
-        if placement_risk >= placement_threshold and (is_nsfw_channel is False):
-            reasons.append(f"placement_risk={placement_risk:.2f}")
-            return EvaluationResult("yellow", reasons)
+        exposure_det = self._max_exposed_detection(nudity)
+        exposure_peak = max(exposure_score, exposure_det)
 
-        return EvaluationResult(DEFAULT_SEVERITY, reasons)
+        metrics = {
+            "questionable": questionable,
+            "explicit": explicit,
+            "general_rating": general_rating,
+            "sensitive_rating": sensitive_rating,
+            "nsfw_margin": nsfw_margin,
+            "nsfw_ratio": nsfw_ratio,
+            "nsfw_general_sum": nsfw_general_sum,
+            "exposure_score": exposure_score,
+            "exposure_detection": exposure_det,
+            "exposure_peak": exposure_peak,
+            "placement_risk": placement_risk,
+            "violence_max": violence_max,
+            "violence_sum": violence_sum,
+            "minors_sum": minors_sum,
+            "minors_peak": minors_peak,
+            "animals_sum": animals_sum,
+            "animals_max": animals_max,
+        }
+
+        # RED: Violence/Gore
+        if violence_max >= thresholds.get("gore_any", 0.3) or violence_sum >= thresholds.get("gore_sum", 0.4):
+            reasons = []
+            if violence_max >= thresholds.get("gore_any", 0.3):
+                reasons.append(f"gore_any={violence_max:.2f}")
+            if violence_sum >= thresholds.get("gore_sum", 0.4):
+                reasons.append(f"gore_sum={violence_sum:.2f}")
+            return self._result("red", "RED-201", reasons, metrics)
+
+        # RED: Minors
+        if minors_sum >= thresholds.get("wd14_minors_sum", 0.4):
+            reasons = [f"minors_sum={minors_sum:.2f}"]
+            return self._result("red", "RED-301", reasons, metrics)
+
+        # ORANGE: Adult content outside NSFW
+        exposure_strong = thresholds.get("exposure_strong", 0.6)
+        exposure_mid = thresholds.get("exposure_mid", 0.3)
+        nsfw_margin_min = thresholds.get("nsfw_margin_min", 0.0)
+        nsfw_ratio_min = thresholds.get("nsfw_ratio_min", 0.45)
+        nsfw_general_min = thresholds.get("nsfw_general_sum", 0.2)
+
+        adult_core = questionable >= thresholds.get("wd14_questionable", 0.35)
+        adult_balance = nsfw_margin >= nsfw_margin_min or nsfw_ratio >= nsfw_ratio_min
+        adult_context = nsfw_general_sum >= nsfw_general_min or exposure_peak >= exposure_mid
+        strong_exposure = exposure_peak >= exposure_strong
+
+        if not is_nsfw_channel and ((adult_core and adult_balance and adult_context) or strong_exposure):
+            reasons = [
+                f"q={questionable:.2f}",
+                f"margin={nsfw_margin:.2f}",
+                f"ratio={nsfw_ratio:.2f}",
+                f"nsfw_sum={nsfw_general_sum:.2f}",
+                f"exposure={exposure_peak:.2f}",
+            ]
+            return self._result("orange", "ORANGE-101", reasons, metrics)
+
+        # YELLOW: Minor hint or moderate exposure
+        if minors_peak >= thresholds.get("yellow_minor_hint", 0.2):
+            reasons = [f"minor_hint={minors_peak:.2f}"]
+            if exposure_peak > 0:
+                reasons.append(f"exposure={exposure_peak:.2f}")
+            return self._result("yellow", "YELLOW-201", reasons, metrics)
+
+        if not is_nsfw_channel and (exposure_peak >= exposure_mid or placement_risk >= thresholds.get("exposure_risk", 0.6)):
+            reasons = [f"exposure={exposure_peak:.2f}", f"placement={placement_risk:.2f}"]
+            return self._result("yellow", "YELLOW-101", reasons, metrics)
+
+        return self._result(DEFAULT_SEVERITY, None, [], metrics)
 
     @staticmethod
     def _iter_general_tags(general_tags: Iterable) -> Iterable[tuple[str, float]]:
@@ -130,4 +167,29 @@ class RuleEngine:
                 if name is not None and score is not None:
                     yield name, float(score)
 
+    @staticmethod
+    def _max_exposed_detection(nudity: Iterable[Mapping[str, Any]]) -> float:
+        max_score = 0.0
+        for det in nudity or []:
+            label = det.get("class", "") or ""
+            if label.startswith("EXPOSED_"):
+                score = float(det.get("score", 0.0))
+                if score > max_score:
+                    max_score = score
+        return max_score
 
+    def _result(
+        self,
+        severity: str,
+        rule_id: Optional[str],
+        reasons: List[str],
+        metrics: Dict[str, float],
+    ) -> EvaluationResult:
+        title = self.config.rule_titles.get(rule_id) if rule_id else None
+        return EvaluationResult(
+            severity=severity,
+            rule_id=rule_id,
+            rule_title=title,
+            reasons=reasons,
+            metrics=metrics,
+        )

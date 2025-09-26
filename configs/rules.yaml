@@ -8,6 +8,10 @@ thresholds:
   gore_tag: 0.25
   gore_sum: 0.40
   gore_any: 0.30
+  nsfw_margin_min: 0.00
+  nsfw_ratio_min: 0.45
+  nsfw_general_sum: 0.20
+  exposure_mid: 0.30
   exposure_strong: 0.60
   exposure_risk: 0.60
   yellow_minor_hint: 0.20
@@ -52,6 +56,30 @@ nsfw_general_tags:
   - topless
   - bottomless
   - see_through
+  - breasts
+  - cleavage
+  - nipples
+  - areola
+  - penis
+  - vagina
+  - pubic_hair
+  - cameltoe
+  - groping
+  - sex
+  - erotic
+  - thong
+  - bodysuit
+  - latex
+  - pasties
+
+animal_abuse_tags:
+  - animal_abuse
+  - animal_cruelty
+  - animal_blood
+  - animal_gore
+  - bestiality
+  - zoophilia
+  - zoosadism
 
 xsignals_weights:
   exposure_strong_weight: 1.0
@@ -66,3 +94,9 @@ severity_priority:
   orange: 2
   yellow: 1
 
+rule_titles:
+  RED-201: "暴力・グロが疑われる"
+  RED-301: "未成年の性的描写が疑われる"
+  ORANGE-101: "18+でないチャンネルの成人向けコンテンツ"
+  YELLOW-101: "軽度の露出"
+  YELLOW-201: "若年寄りの特徴を含む"

@@ -14,6 +14,7 @@ class MessageRef:
     url: str
     author_id: Optional[str] = None
     is_nsfw_channel: Optional[bool] = None
+    created_at: Optional[str] = None
 
 
 @dataclass(slots=True)

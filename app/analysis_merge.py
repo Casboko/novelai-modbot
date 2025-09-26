@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Mapping
 
 import yaml
 from .analyzer_nudenet import NudeNetAnalyzer
@@ -117,6 +117,7 @@ def to_message_ref(row: dict) -> MessageRef:
         url=row.get("url", ""),
         author_id=row.get("author_id"),
         is_nsfw_channel=parse_bool(row.get("is_nsfw_channel")),
+        created_at=row.get("created_at"),
     )
 
 
@@ -192,6 +193,10 @@ async def async_main() -> None:
     wd14_entries = load_wd14(args.wd14, args.limit)
     nudenet_cfg = load_yaml(args.nudenet_config)
     xsignals_cfg = load_yaml(args.xsignals_config)
+    try:
+        rules_cfg = load_yaml(Path("configs/rules.yaml"))
+    except FileNotFoundError:
+        rules_cfg = {}
 
     overlay_thresholds = nudenet_cfg.get("thresholds", {})
     keep_topk = int(nudenet_cfg.get("keep_topk", 10))
@@ -202,6 +207,8 @@ async def async_main() -> None:
 
     analyzer = NudeNetAnalyzer()
     cache = NudeNetCache(args.nudenet_cache)
+
+    nsfw_tags = set(rules_cfg.get("nsfw_general_tags", []))
 
     phashes = [ph for ph in wd14_entries if ph in scan_entries]
 
@@ -287,12 +294,34 @@ async def async_main() -> None:
         exposure_score = compute_exposure_score(reduced_detections, overlay_thresholds, exposure_weights)
         placement_risk = compute_placement_risk(wd14_payload, exposure_score, placement_cfg)
 
+        rating = wd14_payload.get("rating", {})
+        general_pairs = []
+        for item in wd14_payload.get("general", []) or []:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                general_pairs.append((str(item[0]), float(item[1])))
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                score = item.get("score")
+                if name is not None and score is not None:
+                    general_pairs.append((str(name), float(score)))
+        general_map = {name: score for name, score in general_pairs}
+        general_rating = float(rating.get("general", 0.0))
+        sensitive_rating = float(rating.get("sensitive", 0.0))
+        questionable = float(rating.get("questionable", 0.0))
+        explicit = float(rating.get("explicit", 0.0))
+        rating_total = general_rating + sensitive_rating + questionable + explicit + 1e-6
+        nsfw_margin = max(questionable, explicit) - max(general_rating, sensitive_rating)
+        nsfw_ratio = (questionable + explicit) / rating_total
+        nsfw_general_sum = sum(float(general_map.get(tag, 0.0)) for tag in nsfw_tags)
+
         record = {
             "phash": phash,
             "guild_id": primary.guild_id,
             "channel_id": primary.channel_id,
             "message_id": primary.message_id,
             "message_link": primary.message_link,
+            "created_at": primary.created_at,
+            "author_id": primary.author_id,
             "source": primary.source,
             "is_nsfw_channel": primary.is_nsfw_channel,
             "messages": [
@@ -320,6 +349,9 @@ async def async_main() -> None:
             "xsignals": {
                 "exposure_score": exposure_score,
                 "placement_risk_pre": placement_risk,
+                "nsfw_margin": nsfw_margin,
+                "nsfw_ratio": nsfw_ratio,
+                "nsfw_general_sum": nsfw_general_sum,
             },
             "meta": {
                 "nudenet_version": analyzer.version,

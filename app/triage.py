@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from .rule_engine import RuleEngine
 
@@ -21,6 +22,7 @@ class ScanSummary:
     total: int
     severity_counts: Counter
     output_path: Path
+    records: List[dict]
 
     def format_message(self) -> str:
         parts = [f"total={self.total}"]
@@ -41,6 +43,12 @@ def run_scan(
     analysis_path: Path | str = ANALYSIS_PATH,
     findings_path: Path | str = FINDINGS_PATH,
     rules_path: Path | str = Path("configs/rules.yaml"),
+    channel_ids: Optional[Sequence[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    severity_filter: Optional[Sequence[str]] = None,
+    time_range: Optional[tuple[datetime, datetime]] = None,
+    default_end_offset: Optional[timedelta] = None,
 ) -> ScanSummary:
     analysis_path = Path(analysis_path)
     findings_path = Path(findings_path)
@@ -51,6 +59,14 @@ def run_scan(
 
     severity_counts: Counter = Counter()
     total = 0
+    filtered_records: List[dict] = []
+    channel_set = set(channel_ids) if channel_ids else None
+    severity_allowed = set(severity_filter) if severity_filter else None
+    start_at, end_at = (
+        time_range
+        if time_range is not None
+        else resolve_time_range(since, until, default_end_offset=default_end_offset)
+    )
 
     with analysis_path.open("r", encoding="utf-8") as src, findings_path.open(
         "w", encoding="utf-8"
@@ -59,15 +75,33 @@ def run_scan(
             if not line.strip():
                 continue
             payload = json.loads(line)
+            if channel_set and payload.get("channel_id") not in channel_set:
+                continue
+            created_at = parse_created_at(payload.get("created_at"))
+            if created_at is not None and not (start_at <= created_at <= end_at):
+                continue
             result = engine.evaluate(payload)
+            if severity_allowed and result.severity not in severity_allowed:
+                continue
             payload["severity"] = result.severity
+            payload["rule_id"] = result.rule_id
+            payload["rule_title"] = result.rule_title
             payload["reasons"] = result.reasons
+            payload["metrics"] = result.metrics
+            for message in payload.get("messages", []) or []:
+                message.setdefault("attachments", [])
             json.dump(payload, dst, ensure_ascii=False)
             dst.write("\n")
             severity_counts[result.severity] += 1
             total += 1
+            filtered_records.append(payload)
 
-    return ScanSummary(total=total, severity_counts=severity_counts, output_path=findings_path)
+    return ScanSummary(
+        total=total,
+        severity_counts=severity_counts,
+        output_path=findings_path,
+        records=filtered_records,
+    )
 
 
 def generate_report(
@@ -75,8 +109,12 @@ def generate_report(
     report_path: Path | str = REPORT_PATH,
     severity: Optional[str] = None,
     rules_path: Path | str = Path("configs/rules.yaml"),
+    channel_ids: Optional[Sequence[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    time_range: Optional[tuple[datetime, datetime]] = None,
+    default_end_offset: Optional[timedelta] = None,
 ) -> ReportSummary:
-    findings_path = Path(findings_path)
     report_path = Path(report_path)
     rules_path = Path(rules_path)
 
@@ -84,19 +122,75 @@ def generate_report(
     violence_tags = set(engine.config.violence_tags)
 
     allowed = {"red", "orange", "yellow", "green"}
-    if severity is not None and severity != "all" and severity not in allowed:
-        raise ValueError(f"Unsupported severity filter: {severity}")
+    severity_filter: Optional[List[str]]
+    if severity is None or severity == "all":
+        severity_filter = None
+    else:
+        severity_filter = [token.strip() for token in severity.split(",") if token.strip()]
+        invalid = [token for token in severity_filter if token not in allowed]
+        if invalid:
+            raise ValueError(f"Unsupported severity filter: {', '.join(invalid)}")
+    records = load_findings(
+        findings_path,
+        channel_ids=channel_ids,
+        since=since,
+        until=until,
+        severity=severity_filter,
+        time_range=time_range,
+        default_end_offset=default_end_offset,
+    )
 
-    severity_filter = None if severity in (None, "all") else severity
+    rows = write_report_csv(records, report_path, violence_tags)
+
+    selected = ",".join(severity_filter) if severity_filter else None
+    return ReportSummary(rows=rows, path=report_path, severity_filter=selected)
+
+
+def load_findings(
+    findings_path: Path | str = FINDINGS_PATH,
+    channel_ids: Optional[Sequence[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    severity: Optional[Sequence[str]] = None,
+    time_range: Optional[tuple[datetime, datetime]] = None,
+    default_end_offset: Optional[timedelta] = None,
+) -> List[dict]:
+    findings_path = Path(findings_path)
+    channel_set = set(channel_ids) if channel_ids else None
+    severity_set = set(severity) if severity else None
+    start_at, end_at = (
+        time_range
+        if time_range is not None
+        else resolve_time_range(since, until, default_end_offset=default_end_offset)
+    )
+
+    records: List[dict] = []
+    with findings_path.open("r", encoding="utf-8") as src:
+        for line in src:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if severity_set and payload.get("severity") not in severity_set:
+                continue
+            if channel_set and payload.get("channel_id") not in channel_set:
+                continue
+            created_at = parse_created_at(payload.get("created_at"))
+            if created_at is not None and not (start_at <= created_at <= end_at):
+                continue
+            records.append(payload)
+    return records
+
+
+def write_report_csv(records: Sequence[dict], report_path: Path, violence_tags: set[str]) -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with findings_path.open("r", encoding="utf-8") as src, report_path.open(
-        "w", encoding="utf-8", newline=""
-    ) as dst:
+    with report_path.open("w", encoding="utf-8", newline="") as dst:
         writer = csv.DictWriter(
             dst,
             fieldnames=[
                 "severity",
+                "rule_id",
+                "rule_title",
                 "message_link",
                 "author_id",
                 "is_nsfw_channel",
@@ -108,19 +202,18 @@ def generate_report(
                 "nudity_tops",
                 "exposure_score",
                 "placement_risk_pre",
+                "nsfw_margin",
+                "nsfw_ratio",
+                "nsfw_general_sum",
                 "violence_tags",
+                "animals_sum",
                 "reasons",
             ],
         )
         writer.writeheader()
         rows = 0
-        for line in src:
-            if not line.strip():
-                continue
-            payload = json.loads(line)
+        for payload in records:
             sev = payload.get("severity", "green")
-            if severity_filter and sev != severity_filter:
-                continue
             message = payload.get("messages", [{}])
             primary = message[0] if message else {}
             rating = payload.get("wd14", {}).get("rating", {})
@@ -133,9 +226,12 @@ def generate_report(
                 for tag in formatted_tags
                 if tag.split(":")[0] in violence_tags
             )
+            metrics = payload.get("metrics", {})
             writer.writerow(
                 {
                     "severity": sev,
+                    "rule_id": payload.get("rule_id", ""),
+                    "rule_title": payload.get("rule_title", ""),
                     "message_link": payload.get("message_link", ""),
                     "author_id": primary.get("author_id", ""),
                     "is_nsfw_channel": primary.get("is_nsfw_channel"),
@@ -145,15 +241,19 @@ def generate_report(
                     "wd14_rating_explicit": rating.get("explicit", 0.0),
                     "top_tags": top_tags,
                     "nudity_tops": nudity,
-                    "exposure_score": payload.get("xsignals", {}).get("exposure_score", 0.0),
-                    "placement_risk_pre": payload.get("xsignals", {}).get("placement_risk_pre", 0.0),
+                    "exposure_score": metrics.get("exposure_peak", payload.get("xsignals", {}).get("exposure_score", 0.0)),
+                    "placement_risk_pre": metrics.get("placement_risk", payload.get("xsignals", {}).get("placement_risk_pre", 0.0)),
+                    "nsfw_margin": metrics.get("nsfw_margin", 0.0),
+                    "nsfw_ratio": metrics.get("nsfw_ratio", 0.0),
+                    "nsfw_general_sum": metrics.get("nsfw_general_sum", 0.0),
                     "violence_tags": violence,
+                    "animals_sum": metrics.get("animals_sum", 0.0),
                     "reasons": "; ".join(payload.get("reasons", [])),
                 }
             )
             rows += 1
 
-    return ReportSummary(rows=rows, path=report_path, severity_filter=severity_filter)
+    return rows
 
 
 def _format_top_tags(general: Iterable) -> List[str]:
@@ -178,3 +278,71 @@ def _format_top_detections(detections: Iterable[dict]) -> List[str]:
         if cls:
             formatted.append(f"{cls}:{float(score):.2f}")
     return formatted[:8]
+
+
+RELATIVE_PATTERN = re.compile(
+    r"^(?:(?P<years>\d+)y)?(?:(?P<weeks>\d+)w)?(?:(?P<days>\d+)d)?"
+    r"(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?$"
+)
+
+
+def resolve_time_range(
+    since: Optional[str],
+    until: Optional[str],
+    default_days: int = 7,
+    default_end_offset: Optional[timedelta] = None,
+) -> tuple[datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    if until:
+        end = parse_time_argument(until, now)
+    else:
+        end = now + (default_end_offset or timedelta())
+    start = parse_time_argument(since, now) if since else end - timedelta(days=default_days)
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def parse_time_argument(value: Optional[str], now: datetime) -> datetime:
+    if value is None:
+        return now
+    text = value.strip()
+    if not text:
+        return now
+    lowered = text.lower()
+    if lowered in {"now", "today"}:
+        return now
+    match = RELATIVE_PATTERN.fullmatch(lowered)
+    if match and any(match.groupdict().values()):
+        years = int(match.group("years") or 0)
+        weeks = int(match.group("weeks") or 0)
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = int(match.group("seconds") or 0)
+        total_days = years * 365 + weeks * 7 + days
+        delta = timedelta(days=total_days, hours=hours, minutes=minutes, seconds=seconds)
+        return now - delta
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError as exc:  # noqa: BLE001
+        raise ValueError(f"Invalid datetime format: {value}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+
+def parse_created_at(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt

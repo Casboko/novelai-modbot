@@ -1,43 +1,29 @@
 # Repository Guidelines
 
-## プロジェクト構成とモジュール整理
-- `src/bot/` Discord Bot エントリーポイントと Slash コマンド。`main.py` から `asyncio.run` で起動。
-- `src/pipeline/` メッセージ履歴クロール、pHash 重複排除、CSV/SQLite への永続化を担当。
-- `src/analyzers/` WD14・NudeNet ラッパーとタグ正規化。モデルは `assets/models/` にキャッシュ。
-- `src/rules/` 判定ロジックと通知テンプレを集約。文面は `notify_templates/ja.md` を基準に管理。
-- `tests/` 下に pytest を配置。Discord API 呼び出しは `tests/fixtures/discord_mocks.py` でモック化。
-- サンプル画像やログ雛形は `assets/samples/`、ドキュメントは `docs/` に置き、個人情報を持ち込まない。
+## プロジェクト構成とモジュール
+本リポジトリは Discord サーバー向けモデレーション bot の処理パイプラインを Python で実装しています。主要なモジュールは `app/` 以下にまとまり、`main.py` が Discord クライアントとルールエンジンを起動します。`p0_scan.py` → `cli_wd14.py` → `analysis_merge.py` → `triage.py` の順で添付画像取得から検知レポート生成までを担当します。
+- `configs/` にはルール定義 `rules.yaml` や NudeNet/交差シグナル構成があり、運用パラメータ調整の際に編集します。
+- `models/wd14/` は WD14 EVA02 重みとラベル情報のキャッシュ置き場です。初回推論時に自動的にダウンロードされ、差し替えはリビジョン指定で制御します。
+- `out/` はスキャン結果や生成 CSV を置くためのワークスペースで、各フェーズごとの中間成果物を確認できます。
+- `docs/` とルート直下の P0/P1/P2 文書は運用手順の補足資料であり、作業スケジュールやエスカレーションの参考になります。
+- ルートの `requirements.txt` が公式依存関係リスト、`app/cache_*.sqlite` が推論キャッシュです。削除すると再推論が走ります。
 
 ## ビルド・テスト・開発コマンド
-- `poetry install` 依存を導入。Python 3.11 系を前提にし、poetry.lock を常に最新に保つ。
-- `poetry run pre-commit run --all-files` でフォーマッタ（black）、静的解析（ruff, mypy）を一括実行。
-- `poetry run pytest tests/ --maxfail=1 --ff` 単体・統合テストを最速で確認。
-- `poetry run pytest --cov=src --cov-report=term-missing` でカバレッジを取得し、85% 以上を維持。
-- `poetry run python -m bot.cli scan --guild <guild_id>` 過去履歴クロールをローカルで検証。
-- `poetry run python -m bot.cli report --limit 50` 最新スキャン結果を要約出力し、レビュー用ログを生成。
+- `python -m app.p0_scan --since 2024-01-01 --out out/p0_scan.csv` : Discord から添付ファイルを収集し CSV を蓄積します (`.env` のトークン必須)。
+- `python -m app.cli_wd14 --input out/p0_scan.csv` : WD14 推論を実行し JSONL とメトリクスを出力します (ローカルモデルは自動取得)。
+- `python -m app.analysis_merge --scan out/p0_scan.csv --wd14 out/p1_wd14.jsonl --metrics out/p2_metrics.json` : WD14 と NudeNet の結果を統合して解析 JSONL を生成します。
+- `python -m app.cli_scan --analysis out/p2_analysis.jsonl --findings out/p3_findings.jsonl` : ルール評価を行いサマリーを表示します。
+- `python -m app.cli_report --findings out/p3_findings.jsonl --severity red` : CSV レポートを作成し、重大度フィルタ付きでエクスポートします。
+- `python -m app.cli_report --help` や `python -m app.cli_scan --help` を実行し、追加オプションやチャンネルフィルタを確認してください。
 
 ## コーディングスタイルと命名規約
-- 4 スペースインデント、`from __future__ import annotations` をデフォルトで追加し型注釈を簡潔に。
-- ファイル・モジュールは `snake_case.py`、クラスは `PascalCase`、内部関数は `_snake_case`。
-- 例外メッセージは日本語で書き、Discord ログは構造化 JSON（`structlog`）で `logs/` に出力。
-- black・ruff・mypy の設定は `pyproject.toml` に集約。PR 前に `poetry run pre-commit` を必ず通す。
-- 環境設定は `.env` に保持し、`pydantic.BaseSettings` で読み込む。秘密情報はコードに直書きしない。
+Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹底してください。関数・変数は snake_case、クラスは PascalCase で統一し、型ヒントと `from __future__ import annotations` を前提に遅延評価を維持します。自動整形ツールは同梱されていないため、`ruff` や `black` をローカルで実行し差分がない状態でコミットしてください。非同期処理では `asyncio` ループのキャンセル管理が重要なので、タイムアウト値や `RateLimiter` 利用箇所の命名を明確にしましょう。
 
-## テスト方針
-- pytest + pytest-asyncio を使用。命名は `test_<対象>_<条件>`、統合テストは `tests/integration/` に配置。
-- Discord API 呼び出しは `pytest-httpx` や `responses` でモックし、429 リトライ挙動の回帰テストを含める。
-- 大型フィクスチャは `tests/fixtures/` に保存し、3 MB 未満のサンプル画像のみコミットする。
-- バグ再発防止のため、報告再現用の CLI は `tests/e2e/` で `poetry run python -m tests.e2e.<name>` として提供。
+## テスト指針
+現時点で自動テストスイートは未整備です。新規機能を追加する際は `tests/` ディレクトリを作成し `pytest` ベースのテストを導入してください。I/O を伴う処理は Discord クライアントや Hugging Face API をモックし、副作用のないユニットテストを優先します。主要フローごとに `test_<module>.py` 形式で命名し、スキャンからルール評価までのハッピーパスと代表的なエラーケースを最低限カバーしてください。回帰を防ぐため、重い推論は `monkeypatch` でキャッシュ層にスタブを挿入し、データサンプルは `tests/fixtures/` に配置しましょう。
 
 ## コミットとプルリクエスト
-- コミットは Conventional Commits を準拠。例: `feat(scanner): add thread resume cursor`。
-- 設定・CI 変更は `chore(config): ...`、ドキュメントは `docs:` プレフィックスで分離。
-- PR 説明は「背景」「変更点」「検証」の 3 項目を必須。関連 Issue、スキャン結果ログ、スクリーンショットを添付。
-- レビュー前に `poetry run pre-commit run --all-files` と `poetry run pytest` の結果を PR テンプレートに記載。
-- モデル更新や閾値調整の際は、影響ギルドとロールアウト手順を PR に明記してからマージ。
+コミットメッセージは `feat(scope): summary` 形式の Conventional Commits が利用されています。変更内容と影響範囲を明確にするため `fix`, `chore`, `docs` なども適宜活用してください。プルリクエストには目的、主な変更点、検証ログ (`python -m app.cli_scan --help` など) を記載し、関連 issue やチケット番号をリンクします。レビューではキャッシュ破棄の有無や Discord API 制限への影響を説明し、Discord 出力や通知内容を変更した場合はスクリーンショット、サンプルログ、生成 CSV の抜粋を添付してください。
 
-## セキュリティと設定管理
-- `DISCORD_BOT_TOKEN`, `DATABASE_URL`, `HF_TOKEN` などの資格情報は `.env` で管理し、`.env.example` を更新。
-- モデルキャッシュは `assets/models/` に置き、`assets/models/VERSION` に SHA256 を記録して改ざん検出を行う。
-- ローカル永続化は `data/` 配下に限定し、個人識別情報を含むファイルは `.gitignore` に追加。
-- 本番ギルド設定は `config/prod.yaml` を参照し、暗号化ストレージ経由で配布。平文共有は禁止。
+## セキュリティと設定
+`.env` に `DISCORD_BOT_TOKEN`、`GUILD_ID`、`LOG_CHANNEL_ID` などの機密値を設定します。ファイルは git 管理外で保持し、共有は安全な秘密情報マネージャー経由で行ってください。外部モデルを更新する際は `configs/` と `models/` の差分を確認し、秘匿情報を誤ってコミットしないよう `git status` と `.gitignore` を実行前に点検しましょう。ローカル検証ではテスト用トークンを使用し、本番トークンは CI やホスティング環境のシークレットストアに限定してください。

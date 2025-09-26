@@ -21,10 +21,10 @@ def create_client() -> tuple[discord.Client, app_commands.CommandTree]:
     @client.event
     async def on_ready() -> None:
         logger.info("ready %s", client.user)
+        await tree.sync()
         guild_id = settings.guild_id
         if guild_id is not None:
-            await tree.sync(guild=discord.Object(id=guild_id))
-        else:
-            await tree.sync()
+            guild = discord.Object(id=guild_id)
+            await tree.sync(guild=guild)
 
     return client, tree
