@@ -12,6 +12,9 @@ __pycache__/
 # Scanner outputs
 out/
 
+# Local caches / databases
+*.sqlite
+
 # Model cache (tracked via gitkeep only)
 models/**
 !models/

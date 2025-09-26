@@ -7,7 +7,6 @@ import csv
 import json
 import logging
 import mimetypes
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +18,7 @@ import imagehash
 from discord import abc
 
 from .config import get_settings
+from .http_client import ImageFetcher, RateLimiter
 from .util import compute_phash
 
 
@@ -159,22 +159,6 @@ class CsvSink:
             self._file.close()
             self._file = None
             self._writer = None
-
-
-class RateLimiter:
-    def __init__(self, qps: float) -> None:
-        self._interval = 1.0 / max(qps, 1.0)
-        self._last = 0.0
-        self._lock = asyncio.Lock()
-
-    async def wait(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            delay = self._interval - (now - self._last)
-            if delay > 0:
-                await asyncio.sleep(delay)
-                now = time.monotonic()
-            self._last = now
 
 
 class PhashIndex:

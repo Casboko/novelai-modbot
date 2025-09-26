@@ -2,8 +2,10 @@ discord.py>=2.4
 Pillow
 imagehash
 numpy
-onnxruntime
+onnxruntime>=1.17.0
 nudenet
 python-dotenv
 pydantic
 pydantic-settings
+pandas
+huggingface_hub

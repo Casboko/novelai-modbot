@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import csv
+import json
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List
+
+from PIL import Image
+
+from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
+from .batch_loader import ImageLoadResult, ImageRequest, load_images
+from .cache_wd14 import CacheKey, WD14Cache
+from .config import get_settings
+from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
+
+
+@dataclass(slots=True)
+class Entry:
+    phash: str
+    urls: set[str]
+    rows: list[dict[str, str]]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="WD14 EVA02 batch inference")
+    parser.add_argument("--input", type=Path, default=Path("out/p0_scan.csv"))
+    parser.add_argument("--out", type=Path, default=Path("out/p1_wd14.jsonl"))
+    parser.add_argument("--metrics", type=Path, default=Path("out/p1_wd14_metrics.json"))
+    parser.add_argument("--cache", type=Path, default=Path("app/cache_wd14.sqlite"))
+    parser.add_argument("--model-id", type=str, default=REPO_ID)
+    parser.add_argument("--model-revision", type=str, default="main")
+    parser.add_argument("--provider", type=str, default="cpu", choices=["cpu", "openvino"])
+    parser.add_argument("--threads", type=int, default=0)
+    parser.add_argument("--general-threshold", type=float, default=0.35)
+    parser.add_argument("--character-threshold", type=float, default=0.85)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--qps", type=float, default=5.0)
+    parser.add_argument("--limit", type=int, default=0, help="Optional limit on number of unique pHashes")
+    return parser.parse_args()
+
+
+def load_entries(csv_path: Path, limit: int = 0) -> dict[str, Entry]:
+    entries: dict[str, Entry] = {}
+    with csv_path.open("r", encoding="utf-8") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            phash = row.get("phash_hex", "").strip()
+            if not phash:
+                continue
+            url = row.get("url", "").strip()
+            if not url:
+                continue
+            entry = entries.setdefault(phash, Entry(phash=phash, urls=set(), rows=[]))
+            entry.urls.add(url)
+            entry.rows.append(row)
+            if limit and len(entries) >= limit:
+                break
+    return entries
+
+
+def build_requests(entries: dict[str, Entry], missing: Iterable[str]) -> list[ImageRequest]:
+    requests: list[ImageRequest] = []
+    for phash in missing:
+        entry = entries[phash]
+        requests.append(ImageRequest(identifier=phash, urls=tuple(entry.urls)))
+    return requests
+
+
+def chunked(sequence: list[str], size: int) -> Iterable[list[str]]:
+    for idx in range(0, len(sequence), size):
+        yield sequence[idx : idx + size]
+
+
+def serialize_prediction(
+    phash: str,
+    entry: Entry,
+    payload: dict,
+) -> dict:
+    message_refs: list[dict[str, str]] = []
+    for row in entry.rows:
+        message_refs.append(
+            {
+                "message_link": row.get("message_link", ""),
+                "message_id": row.get("message_id", ""),
+                "channel_id": row.get("channel_id", ""),
+                "guild_id": row.get("guild_id", ""),
+                "source": row.get("source", ""),
+                "url": row.get("url", ""),
+            }
+        )
+    return {
+        "phash": phash,
+        "messages": message_refs,
+        "wd14": payload,
+    }
+
+
+def build_payload(
+    prediction: WD14Prediction,
+    *,
+    model_id: str,
+    model_revision: str,
+    input_size: int,
+) -> dict:
+    return {
+        "model": model_id,
+        "revision": model_revision,
+        "input_size": input_size,
+        "rating": prediction.rating,
+        "general": prediction.general,
+        "character": prediction.character,
+        "raw": prediction.raw_scores.tolist(),
+    }
+
+
+async def run() -> None:
+    args = parse_args()
+    entries = load_entries(args.input, args.limit)
+    if not entries:
+        raise SystemExit("No entries found in CSV. Did you run p0 scan?")
+
+    label_csv, model_path = ensure_local_files(repo_id=args.model_id)
+    labelspace = load_labelspace(label_csv)
+    session = WD14Session(model_path, provider=args.provider, threads=args.threads)
+    analyzer = WD14Analyzer(
+        session,
+        labelspace,
+        general_threshold=args.general_threshold,
+        character_threshold=args.character_threshold,
+    )
+
+    cache = WD14Cache(Path(args.cache))
+    cache_hits = 0
+    cache_key_map: dict[str, dict] = {}
+    failures: dict[str, str] = {}
+
+    all_phashes = list(entries.keys())
+
+    for phash in all_phashes:
+        key = CacheKey(phash=phash, model=args.model_id, revision=args.model_revision)
+        cached = cache.get(key)
+        if cached is not None:
+            cache_hits += 1
+            cache_key_map[phash] = cached
+
+    missing = [phash for phash in all_phashes if phash not in cache_key_map]
+
+    for batch_phashes in chunked(missing, args.batch_size):
+        requests = build_requests(entries, batch_phashes)
+        results = await load_images(
+            requests,
+            qps=args.qps,
+            concurrency=args.concurrency,
+        )
+        successful_results: list[ImageLoadResult] = [r for r in results if r.image is not None]
+        images: list[Image.Image] = [r.image for r in successful_results]
+        if images:
+            predictions = analyzer.predict(images)
+        else:
+            predictions = []
+        for result, prediction in zip(successful_results, predictions):
+            payload = build_payload(
+                prediction,
+                model_id=args.model_id,
+                model_revision=args.model_revision,
+                input_size=session.size,
+            )
+            cache_key_map[result.request.identifier] = payload
+            cache.set(
+                CacheKey(
+                    phash=result.request.identifier,
+                    model=args.model_id,
+                    revision=args.model_revision,
+                ),
+                payload,
+            )
+        for result in results:
+            if result.image is None:
+                reason = result.note or "fetch_failed"
+                failures[result.request.identifier] = reason
+                cache_key_map.setdefault(
+                    result.request.identifier,
+                    {
+                        "model": args.model_id,
+                        "revision": args.model_revision,
+                        "error": reason,
+                    },
+                )
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with args.out.open("w", encoding="utf-8") as fp:
+        for phash in all_phashes:
+            payload = cache_key_map.get(phash)
+            if payload is None:
+                continue
+            entry = entries[phash]
+            json.dump(serialize_prediction(phash, entry, payload), fp, ensure_ascii=False)
+            fp.write("\n")
+
+    success_count = sum(1 for payload in cache_key_map.values() if "error" not in payload)
+    metrics = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_unique": len(all_phashes),
+        "from_cache": cache_hits,
+        "evaluated": success_count,
+        "failed": failures,
+        "model": args.model_id,
+        "revision": args.model_revision,
+        "input_size": session.size,
+    }
+    args.metrics.parent.mkdir(parents=True, exist_ok=True)
+    args.metrics.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main() -> None:
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()
