@@ -9,3 +9,4 @@ pydantic
 pydantic-settings
 pandas
 huggingface_hub
+PyYAML

@@ -1,0 +1,17 @@
+exposure_score:
+  strong_weight: 1.0
+  weak_weight: 0.6
+placement_risk_pre:
+  rating_weight: 0.5
+  general_weight: 0.3
+  exposure_weight: 0.7
+  topk: 3
+  nsfw_tags:
+    - bikini
+    - lingerie
+    - underwear
+    - panties
+    - bra
+    - swimsuit
+    - swimwear
+    - naked

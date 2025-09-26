@@ -1,0 +1,7 @@
+version: "2.0.1"
+thresholds:
+  strong_exposed: 0.60
+  weak_exposed: 0.50
+  auxiliary: 0.70
+keep_topk: 10
+batch_size: 8
