@@ -1,0 +1,68 @@
+models:
+  wd14_repo: "SmilingWolf/wd-eva02-large-tagger-v3"
+
+thresholds:
+  wd14_questionable: 0.35
+  wd14_explicit: 0.20
+  wd14_minors_sum: 0.40
+  gore_tag: 0.25
+  gore_sum: 0.40
+  gore_any: 0.30
+  exposure_strong: 0.60
+  exposure_risk: 0.60
+  yellow_minor_hint: 0.20
+
+minor_tags:
+  - loli
+  - shota
+  - child
+  - kid
+  - toddler
+  - teen
+  - young
+  - kindergarten
+  - infant
+
+violence_tags:
+  - gore
+  - blood
+  - guts
+  - wound
+  - open_wound
+  - severed_arm
+  - severed_leg
+  - severed_head
+  - decapitation
+  - disembowelment
+  - skull
+  - bone
+  - dismemberment
+  - guro
+
+nsfw_general_tags:
+  - bikini
+  - lingerie
+  - underwear
+  - panties
+  - bra
+  - swimsuit
+  - swimwear
+  - naked
+  - nude
+  - topless
+  - bottomless
+  - see_through
+
+xsignals_weights:
+  exposure_strong_weight: 1.0
+  exposure_weak_weight: 0.6
+  placement_rating_weight: 0.5
+  placement_general_weight: 0.3
+  placement_exposure_weight: 0.7
+  placement_general_topk: 3
+
+severity_priority:
+  red: 3
+  orange: 2
+  yellow: 1
+

@@ -12,6 +12,7 @@ class MessageRef:
     guild_id: str
     source: str
     url: str
+    author_id: Optional[str] = None
     is_nsfw_channel: Optional[bool] = None
 
 

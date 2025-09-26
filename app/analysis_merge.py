@@ -115,6 +115,7 @@ def to_message_ref(row: dict) -> MessageRef:
         guild_id=row.get("guild_id", ""),
         source=row.get("source", ""),
         url=row.get("url", ""),
+        author_id=row.get("author_id"),
         is_nsfw_channel=parse_bool(row.get("is_nsfw_channel")),
     )
 
@@ -302,6 +303,7 @@ async def async_main() -> None:
                     "guild_id": msg.guild_id,
                     "source": msg.source,
                     "url": msg.url,
+                    "author_id": msg.author_id,
                     "is_nsfw_channel": msg.is_nsfw_channel,
                 }
                 for msg in messages
