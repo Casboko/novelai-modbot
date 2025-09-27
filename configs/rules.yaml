@@ -21,11 +21,24 @@ minor_tags:
   - shota
   - child
   - kid
+  - newborn
+  - baby
+  - infant
   - toddler
+  - preteen
   - teen
   - young
-  - kindergarten
-  - infant
+  - younger
+  - adolescent
+  - little_girl
+  - little_boy
+  - schoolgirl
+  - schoolboy
+  - school_uniform
+  - randoseru
+  - flat_chest
+  - small_breasts
+  - chibi
 
 violence_tags:
   - gore
@@ -42,6 +55,47 @@ violence_tags:
   - bone
   - dismemberment
   - guro
+  - ryona
+  - bruise
+  - scar
+  - torture
+  - whipping
+  - burn
+  - crying
+  - pain
+  - fight
+  - murder
+  - strangulation
+  - asphyxiation
+  - drowning
+  - electrocution
+  - poison
+  - stab
+  - slash
+  - gunshot
+  - explosion
+  - cannibalism
+  - corpse
+  - zombie
+  - fear
+  - scream
+  - abuse
+  - bullying
+  - rape
+  - execution
+  - war
+  - drug
+  - pill
+  - syringe
+  - injection
+  - marijuana
+  - cocaine
+  - heroin
+  - meth
+  - lsd
+  - ecstasy
+  - smoking
+  - addiction
 
 nsfw_general_tags:
   - bikini
@@ -71,6 +125,39 @@ nsfw_general_tags:
   - bodysuit
   - latex
   - pasties
+  - explicit
+  - aroused
+  - pussy
+  - ass
+  - anal
+  - orgasm
+  - masturbation
+  - bondage
+  - futanari
+  - oral
+  - blowjob
+  - cunnilingus
+  - vaginal
+  - penetration
+  - ejaculation
+  - cum
+  - semen
+  - tentacles
+  - dildo
+  - vibrator
+  - bdsm
+  - spanking
+  - collar
+  - leash
+  - slave
+  - gangbang
+  - orgy
+  - incest
+  - lactation
+  - pregnant
+  - wet
+  - sweat
+  - saliva
 
 animal_abuse_tags:
   - animal_abuse
@@ -80,6 +167,48 @@ animal_abuse_tags:
   - bestiality
   - zoophilia
   - zoosadism
+  - animal_harm
+  - animal_torture
+  - dead_animal
+  - taxidermy
+  - animal_fight
+  - animal_trap
+  - animal_starvation
+  - animal_neglect
+  - feral_abuse
+  - furry_bestiality
+  - yiff
+  - animal_corpse
+  - hunting
+  - dog
+  - cat
+  - horse
+  - bird
+  - rabbit
+  - cow
+  - pig
+  - snake
+  - insect
+  - furry
+  - wolf
+  - fox
+  - lion
+  - tiger
+  - bear
+  - deer
+  - sheep
+  - goat
+  - fish
+  - reptile
+  - amphibian
+  - rodent
+  - monkey
+  - elephant
+  - dragon
+  - unicorn
+  - pokemon
+  - anthro
+  - kemono
 
 xsignals_weights:
   exposure_strong_weight: 1.0
