@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-from typing import Iterable, List, NamedTuple, Optional, Sequence
+from typing import Any, Iterable, List, NamedTuple, Optional, Sequence
 
 import discord
 from discord import app_commands
@@ -60,6 +60,11 @@ class PreviewInfo(NamedTuple):
     image_url: Optional[str]
     original_url: Optional[str]
     is_spoiler: bool = False
+
+
+class TicketEntry(NamedTuple):
+    ticket: Ticket
+    record: dict
 
 
 def _severity_badge(severity: str) -> str:
@@ -217,6 +222,37 @@ def find_record_for_message(channel_id: int, message_id: int) -> Optional[dict]:
             if _record_matches_message(record, channel_id, message_id):
                 return record
     return None
+
+
+def load_findings_index() -> dict[tuple[int, int], dict]:
+    path = Path("out/p3_findings.jsonl")
+    if not path.exists():
+        return {}
+
+    def _key(cid: Any, mid: Any) -> Optional[tuple[int, int]]:
+        try:
+            return int(cid), int(mid)
+        except (TypeError, ValueError):
+            return None
+
+    index: dict[tuple[int, int], dict] = {}
+    with path.open("r", encoding="utf-8") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = _key(record.get("channel_id"), record.get("message_id"))
+            if key is not None:
+                index[key] = record
+            for msg in record.get("messages", []) or []:
+                key = _key(msg.get("channel_id"), msg.get("message_id"))
+                if key is not None and key not in index:
+                    index[key] = record
+    return index
 
 
 async def process_notification(
@@ -462,6 +498,33 @@ async def handle_due_ticket(
     )
 
 
+async def process_ticket_cancel(
+    client: discord.Client,
+    settings,
+    ticket_store: TicketStore,
+    *,
+    ticket: Ticket,
+    executor: discord.abc.User,
+    record: Optional[dict] = None,
+) -> tuple[str, Optional[Ticket]]:
+    if ticket.status != "notified":
+        return "このチケットは既に処理済みです。", None
+    updated = await ticket_store.cancel_ticket(ticket.ticket_id, actor_id=executor.id)
+    if updated is None:
+        return "チケットが見つかりませんでした。", None
+    record_data = record or find_record_for_message(ticket.channel_id, ticket.message_id)
+    record_data = _ensure_record_defaults(record_data, updated, None)
+    await send_ticket_log(
+        client,
+        settings,
+        updated,
+        action="キャンセル",
+        result="モデレーターがキャンセルしました",
+        record=record_data,
+    )
+    return f"チケット {updated.ticket_id} をキャンセルしました。", updated
+
+
 async def ticket_watcher(
     client: discord.Client,
     settings,
@@ -658,8 +721,68 @@ class ReportPaginator(discord.ui.View):
         if self.message:
             await self.message.edit(view=self)
 
+
+class TicketPaginator(discord.ui.View):
+    def __init__(
+        self,
+        client: discord.Client,
+        settings,
+        ticket_store: TicketStore,
+        entries: Sequence[TicketEntry],
+        requester: discord.User,
+    ) -> None:
+        super().__init__(timeout=600)
+        self.client = client
+        self.settings = settings
+        self.ticket_store = ticket_store
+        self.entries = list(entries)
+        self.requester = requester
+        self.index = 0
+        self.message: Optional[discord.Message] = None
+        self._preview_cache: dict[tuple[int, int, str], PreviewInfo] = {}
+        self._member_cache: dict[int, discord.Member] = {}
+        self._current_preview: PreviewInfo | None = None
+        self._open_message_button = discord.ui.Button(
+            label="投稿を開く",
+            style=discord.ButtonStyle.link,
+            url="https://discord.com",
+            row=1,
+            disabled=True,
+        )
+        self._open_original_button = discord.ui.Button(
+            label="元画像を開く",
+            style=discord.ButtonStyle.link,
+            url="https://discord.com",
+            disabled=True,
+            row=1,
+        )
+        self.add_item(self._open_message_button)
+        self.add_item(self._open_original_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester.id:
+            await interaction.response.send_message(
+                "このビューを操作できるのは発行者のみです。",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    def _current_entry(self) -> TicketEntry:
+        return self.entries[self.index]
+
     def _current_record(self) -> dict:
-        return self.records[self.index]
+        return self._current_entry().record
+
+    def _current_ticket(self) -> Ticket:
+        return self._current_entry().ticket
 
     def _record_key(self, record: dict) -> Optional[tuple[int, int, str]]:
         channel_id = record.get("channel_id") or (record.get("messages") or [{}])[0].get("channel_id")
@@ -673,13 +796,21 @@ class ReportPaginator(discord.ui.View):
         return None
 
     def _build_embed(self, preview: PreviewInfo, author: Optional[discord.abc.User]) -> discord.Embed:
-        return build_record_embed(
+        embed = build_record_embed(
             self._current_record(),
             self.index,
-            len(self.records),
+            len(self.entries),
             preview,
             author,
         )
+        ticket = self._current_ticket()
+        due_local = ticket.due_at.astimezone(JST)
+        embed.add_field(name="通知期限", value=f"{due_local:%Y-%m-%d %H:%M} JST", inline=False)
+        embed.add_field(name="チケットID", value=ticket.ticket_id, inline=False)
+        footer_text = embed.footer.text if embed.footer else ""
+        footer_parts = [part for part in (footer_text, f"ticket={ticket.ticket_id}") if part]
+        embed.set_footer(text=" ・ ".join(footer_parts))
+        return embed
 
     async def _resolve_member(self, record: dict) -> Optional[discord.Member]:
         author_id = record.get("author_id") or (record.get("messages") or [{}])[0].get("author_id")
@@ -747,15 +878,16 @@ class ReportPaginator(discord.ui.View):
                     }
             return None
 
-        preview_data = record.get("preview", {})
-        url = preview_data.get("source_url") if isinstance(preview_data, dict) else None
+        preview_data = record.get("preview")
         attachment = None
-        if url:
-            attachment = {
-                "url": url,
-                "content_type": "image/unknown",
-                "is_spoiler": bool(preview_data.get("is_spoiler")) if isinstance(preview_data, dict) else False,
-            }
+        if isinstance(preview_data, dict):
+            url = preview_data.get("source_url") or preview_data.get("url")
+            if url:
+                attachment = {
+                    "url": url,
+                    "content_type": "image/unknown",
+                    "is_spoiler": bool(preview_data.get("is_spoiler")),
+                }
         if attachment is None:
             attachment = first_image_from_messages(record.get("messages", []))
         if attachment is None:
@@ -798,16 +930,23 @@ class ReportPaginator(discord.ui.View):
         return PreviewInfo(thumbnail_url, image_url, original_url, is_spoiler)
 
     def _update_button_state(self) -> None:
-        target_available = self._message_targets() is not None
+        has_entries = bool(self.entries)
         for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id == "prev":
-                child.disabled = self.index == 0
-            if isinstance(child, discord.ui.Button) and child.custom_id == "next":
-                child.disabled = self.index >= len(self.records) - 1
-            if isinstance(child, discord.ui.Button) and child.custom_id == "notify":
-                child.disabled = not target_available
-            if isinstance(child, discord.ui.Button) and child.custom_id == "log":
-                child.disabled = not bool(self.settings.log_channel_id)
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "prev":
+                    child.disabled = not has_entries or self.index == 0
+                elif child.custom_id == "next":
+                    child.disabled = not has_entries or self.index >= len(self.entries) - 1
+                elif child.custom_id == "log":
+                    child.disabled = not has_entries or not bool(self.settings.log_channel_id)
+                elif child.custom_id == "cancel":
+                    child.disabled = not has_entries or self._message_targets() is None
+        if not has_entries:
+            self._open_message_button.url = "https://discord.com"
+            self._open_message_button.disabled = True
+            self._open_original_button.url = "https://discord.com"
+            self._open_original_button.disabled = True
+            return
         record = self._current_record()
         message_url = record.get("message_link")
         if message_url:
@@ -825,71 +964,89 @@ class ReportPaginator(discord.ui.View):
             self._open_original_button.disabled = True
 
     async def send_initial(self, interaction: discord.Interaction) -> None:
-        preview = await self._ensure_preview()
-        self._current_preview = preview
+        if not self.entries:
+            await interaction.followup.send("通知待ちのチケットはありません。", ephemeral=True)
+            return
+        self._current_preview = await self._ensure_preview()
         author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(preview, author)
+        embed = self._build_embed(self._current_preview, author)
         self._update_button_state()
-        message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
-        self.message = message
+        self.message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
 
-    async def _refresh(self, interaction: discord.Interaction) -> None:
-        preview = await self._ensure_preview()
-        self._current_preview = preview
+    async def _respond_refresh(self, interaction: discord.Interaction) -> None:
+        if not self.entries:
+            await interaction.response.edit_message(content="通知待ちのチケットはありません。", embed=None, view=None)
+            return
+        self._current_preview = await self._ensure_preview()
         author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(preview, author)
+        embed = self._build_embed(self._current_preview, author)
         self._update_button_state()
-        if self.message and self.message.attachments:
-            await interaction.response.edit_message(embed=embed, view=self, attachments=self.message.attachments)
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _refresh_message(self) -> None:
+        if not self.message:
+            return
+        if not self.entries:
+            self._update_button_state()
+            await self.message.edit(content="通知待ちのチケットはありません。", embed=None, view=None)
+            return
+        self._current_preview = await self._ensure_preview()
+        author = await self._resolve_member(self._current_record())
+        embed = self._build_embed(self._current_preview, author)
+        self._update_button_state()
+        await self.message.edit(embed=embed, view=self)
 
     def _message_targets(self) -> Optional[tuple[int, int]]:
-        messages = self._current_record().get("messages") or []
+        if not self.entries:
+            return None
+        record = self._current_record()
+        messages = record.get("messages") or []
         if not messages:
             return None
         entry = messages[0]
         try:
-            return int(entry["channel_id"]), int(entry["message_id"])
-        except (KeyError, ValueError, TypeError):
+            return int(entry.get("channel_id")), int(entry.get("message_id"))
+        except (TypeError, ValueError):
             return None
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="prev", row=0)
     async def on_prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.entries:
+            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+            return
         if self.index > 0:
             self.index -= 1
-        await self._refresh(interaction)
+        await self._respond_refresh(interaction)
 
-    @discord.ui.button(label="通知する", style=discord.ButtonStyle.primary, custom_id="notify", row=2)
-    async def on_notify(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.danger, custom_id="cancel", row=2)
+    async def on_cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.entries:
+            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
-        target = self._message_targets()
-        if target is None:
-            await interaction.followup.send("対象メッセージの情報が見つかりませんでした。", ephemeral=True)
-            return
-        guild_id = interaction.guild_id or self.settings.guild_id
-        if guild_id is None:
-            await interaction.followup.send("サーバー情報が取得できませんでした。", ephemeral=True)
-            return
-        try:
-            _ticket, _, message = await process_notification(
-                self.client,
-                self.settings,
-                self.ticket_store,
-                guild_id=int(guild_id),
-                channel_id=target[0],
-                message_id=target[1],
-                executor=interaction.user,
-                record=self._current_record(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("notify button failed")
-            await interaction.followup.send(f"通知に失敗しました: {exc}", ephemeral=True)
-            return
-        await interaction.followup.send(message, ephemeral=True)
+        entry = self._current_entry()
+        message_text, updated = await process_ticket_cancel(
+            self.client,
+            self.settings,
+            self.ticket_store,
+            ticket=entry.ticket,
+            executor=interaction.user,
+            record=entry.record,
+        )
+        if updated is not None:
+            self.entries.pop(self.index)
+            if self.entries:
+                if self.index >= len(self.entries):
+                    self.index = len(self.entries) - 1
+                self._current_preview = None
+            await self._refresh_message()
+        await interaction.followup.send(message_text, ephemeral=True)
 
     @discord.ui.button(label="モデログ転送", style=discord.ButtonStyle.secondary, custom_id="log", row=2)
     async def on_log(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.entries:
+            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         channel_id = self.settings.log_channel_id
         if not channel_id:
@@ -912,9 +1069,12 @@ class ReportPaginator(discord.ui.View):
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next", row=0)
     async def on_next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if self.index < len(self.records) - 1:
+        if not self.entries:
+            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+            return
+        if self.index < len(self.entries) - 1:
             self.index += 1
-        await self._refresh(interaction)
+        await self._respond_refresh(interaction)
 
 
 def register_commands(
@@ -1133,6 +1293,25 @@ def register_commands(
                     file=discord.File(fp=fp, filename=csv_path.name),
                     ephemeral=True,
                 )
+
+    @tree.command(name="tickets", description="通知待ちチケットを表示", guild=guild)
+    @app_commands.guild_only()
+    async def tickets_command(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        active_tickets = await ticket_store.fetch_active_tickets()
+        if not active_tickets:
+            await interaction.followup.send("通知待ちのチケットはありません。", ephemeral=True)
+            return
+        record_index = load_findings_index()
+        entries: list[TicketEntry] = []
+        for ticket in active_tickets:
+            record = record_index.get((ticket.channel_id, ticket.message_id))
+            if record is None:
+                record = find_record_for_message(ticket.channel_id, ticket.message_id)
+            record_data = _ensure_record_defaults(record, ticket, None)
+            entries.append(TicketEntry(ticket=ticket, record=record_data))
+        view = TicketPaginator(client, settings, ticket_store, entries, interaction.user)
+        await view.send_initial(interaction)
 
     watcher_task: asyncio.Task | None = None
 

@@ -15,6 +15,16 @@ thresholds:
   exposure_strong: 0.60
   exposure_risk: 0.60
   yellow_minor_hint: 0.20
+  sexual_explicit_sum_med: 0.10
+  sexual_explicit_sum_high: 0.15
+  sexual_modifier_sum_min: 0.10
+  animal_subject_min: 0.35
+  minor_peak_min: 0.20
+  gore_peak_min: 0.30
+  gore_sum_min: 0.40
+  dismember_peak_min: 0.20
+  mild_exposure_peak_min: 0.30
+  drug_any_min: 0.15
 
 minor_tags:
   - loli
@@ -210,3 +220,11 @@ rule_titles:
   ORANGE-101: "18+でないチャンネルの成人向けコンテンツ"
   YELLOW-101: "軽度の露出"
   YELLOW-201: "若年寄りの特徴を含む"
+  RED-NSFW-101: "非NSFWチャンネルの性的表現"
+  RED-MINOR-SEX-201: "未成年×性的"
+  RED-MINOR-GORE-202: "未成年×流血/損壊"
+  RED-ANIMAL-SEX-301: "動物×性的/獣姦"
+  RED-ANIMAL-GORE-302: "動物×虐待/流血"
+  RED-DISMEMBER-BLOOD-401: "欠損×出血"
+  ORANGE-ADULT-SEX-DRUG-501: "成人×性的×薬物"
+  ORANGE-MINOR-MILD-601: "未成年×軽微露出"

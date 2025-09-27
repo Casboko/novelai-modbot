@@ -1,19 +1,108 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import yaml
 
 DEFAULT_SEVERITY = "green"
+DEFAULT_RULES_PATH = "configs/rules.yaml"
+DEFAULT_NUDENET_CONFIG_PATH = "configs/nudenet.yaml"
 KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
 
+# ---------------------------------------------------------------------------
+# 静的サブ集合（全て小文字、スペース区切り）。
+# WD14 の一般タグは `_normalize_tag` の後に lower() してマッチさせる。
+# ---------------------------------------------------------------------------
+SEX_MODIFIER_TAGS = {
+    "cameltoe",
+    "collar",
+    "leash",
+    "lactation",
+    "nipples",
+    "pregnant",
+    "pubic hair",
+    "slave",
+    "spanking",
+}
 
-def _normalize_tag(name: str) -> str:
-    value = str(name)
-    if value in KEEP_UNDERSCORE:
-        return value
-    return value.replace("_", " ")
+ANIMAL_ABUSE_CONTEXT_TAGS = {
+    "animal abuse",
+    "animal cruelty",
+    "animal harm",
+    "animal torture",
+    "animal blood",
+    "animal gore",
+    "animal corpse",
+    "animal trap",
+    "animal fight",
+    "animal starvation",
+    "animal neglect",
+    "feral abuse",
+    "yiff",
+    "bestiality",
+    "zoophilia",
+    "zoosadism",
+    "furry bestiality",
+}
+
+GORE_TAGS = {
+    "blood",
+    "blood on face",
+    "blood on arm",
+    "blood stain",
+    "gore",
+    "guts",
+    "injury",
+    "scar",
+    "scar on face",
+    "scar on arm",
+    "scar across eye",
+    "wound",
+    "bruise",
+    "corpse",
+}
+
+DISMEMBER_TAGS = {
+    "amputation",
+    "amputee",
+    "dismember",
+    "dismemberment",
+    "decapitation",
+    "severed arm",
+    "severed leg",
+    "severed head",
+}
+
+DRUG_KEYWORDS = (
+    "drug",
+    "drugs",
+    "drugged",
+    "pill",
+    "syringe",
+    "injection",
+    "marijuana",
+    "cannabis",
+    "weed",
+    "cocaine",
+    "heroin",
+    "meth",
+    "lsd",
+    "addiction",
+    "overdose",
+)
+
+MILD_EXPOSURE_DEFAULT_PATTERNS = (
+    "ARMPIT",
+    "BELLY",
+    "MIDRIFF",
+    "STOMACH",
+    "ABDOMEN",
+)
+MILD_EXPOSURE_DEFAULT_THRESHOLD = 0.30
+
+THREAT_IGNORED = True  # Violence threat 系タグは今回参照しない（誤検知抑止）
 
 
 @dataclass(slots=True)
@@ -38,16 +127,45 @@ class EvaluationResult:
 
 
 class RuleEngine:
-    def __init__(self, config_path: str | None = None) -> None:
-        path = config_path or "configs/rules.yaml"
-        self.config = self._load_config(path)
+    def __init__(
+        self,
+        config_path: str | None = None,
+        *,
+        nudenet_config_path: str | None = None,
+    ) -> None:
+        rules_path = config_path or DEFAULT_RULES_PATH
+        self.config = self._load_config(rules_path)
+        self._minor_tags = [tag.lower() for tag in self.config.minor_tags]
+        self._violence_tags = [tag.lower() for tag in self.config.violence_tags]
+        self._nsfw_tags = [tag.lower() for tag in self.config.nsfw_tags]
+        # animal_tags から文脈語と主語語を分離
+        context_tags: set[str] = set()
+        subject_tags: set[str] = set()
+        for tag in self.config.animal_tags:
+            lowered = tag.lower()
+            if lowered in ANIMAL_ABUSE_CONTEXT_TAGS:
+                context_tags.add(lowered)
+            else:
+                subject_tags.add(lowered)
+        self._animal_context_tags = sorted(context_tags)
+        self._animal_subject_tags = sorted(subject_tags)
 
+        # NudeNet の軽微露出パターンのロード
+        self._mild_patterns, self._mild_threshold = self._load_mild_exposure_settings(
+            nudenet_config_path or DEFAULT_NUDENET_CONFIG_PATH
+        )
+
+    # ------------------------------------------------------------------
+    # 設定ロード
+    # ------------------------------------------------------------------
     @staticmethod
     def _load_config(path: str) -> RuleConfig:
         with open(path, "r", encoding="utf-8") as fp:
             data = yaml.safe_load(fp)
+
         def normalize_list(items: Iterable[str]) -> List[str]:
             return [_normalize_tag(item) for item in items if isinstance(item, str)]
+
         return RuleConfig(
             wd14_repo=data.get("models", {}).get("wd14_repo", ""),
             thresholds=data.get("thresholds", {}),
@@ -59,46 +177,118 @@ class RuleEngine:
             rule_titles=data.get("rule_titles", {}),
         )
 
+    @staticmethod
+    def _load_mild_exposure_settings(path: str) -> tuple[tuple[str, ...], float]:
+        config_path = Path(path)
+        if not config_path.is_file():
+            return MILD_EXPOSURE_DEFAULT_PATTERNS, MILD_EXPOSURE_DEFAULT_THRESHOLD
+        try:
+            with config_path.open("r", encoding="utf-8") as fp:
+                data = yaml.safe_load(fp) or {}
+        except Exception:  # noqa: BLE001 - 設定読み込み失敗時はデフォルトへフォールバック
+            return MILD_EXPOSURE_DEFAULT_PATTERNS, MILD_EXPOSURE_DEFAULT_THRESHOLD
+        patterns = data.get("mild_exposure_label_patterns")
+        threshold = data.get("mild_exposure_threshold", MILD_EXPOSURE_DEFAULT_THRESHOLD)
+        if isinstance(patterns, Sequence) and patterns:
+            normalized = tuple(str(item).upper() for item in patterns if item)
+            return normalized, float(threshold)
+        return MILD_EXPOSURE_DEFAULT_PATTERNS, float(threshold)
+
+    # ------------------------------------------------------------------
+    # メイン評価
+    # ------------------------------------------------------------------
     def evaluate(self, analysis: Mapping[str, Any]) -> EvaluationResult:
-        wd14 = analysis.get("wd14", {})
-        rating = wd14.get("rating", {})
-        general_tags = wd14.get("general", [])
+        wd14 = analysis.get("wd14") or {}
+        rating = wd14.get("rating") or {}
+        general_tags = wd14.get("general") or []
         general_map = {
-            _normalize_tag(tag): score
+            _normalize_tag(tag).lower(): score
             for tag, score in self._iter_general_tags(general_tags)
         }
         xsignals = analysis.get("xsignals", {})
         nudity = analysis.get("nudity_detections", [])
         is_nsfw_channel = bool(analysis.get("is_nsfw_channel"))
 
-        thresholds = self.config.thresholds
-
         questionable = float(rating.get("questionable", 0.0))
         explicit = float(rating.get("explicit", 0.0))
         general_rating = float(rating.get("general", 0.0))
         sensitive_rating = float(rating.get("sensitive", 0.0))
+
         exposure_score = float(xsignals.get("exposure_score", 0.0))
         placement_risk = float(xsignals.get("placement_risk_pre", 0.0))
+        nsfw_margin = float(xsignals.get("nsfw_margin", max(questionable, explicit) - max(general_rating, sensitive_rating)))
+        nsfw_ratio = float(xsignals.get("nsfw_ratio", 0.0))
+        nsfw_general_sum = float(xsignals.get("nsfw_general_sum", 0.0))
+        if not nsfw_general_sum:
+            nsfw_general_sum = self._sum_by_tags(general_map, self._nsfw_tags)
 
-        nsfw_general_sum = sum(float(general_map.get(tag, 0.0)) for tag in self.config.nsfw_tags)
-        nsfw_margin = max(questionable, explicit) - max(general_rating, sensitive_rating)
-        rating_total = questionable + explicit + general_rating + sensitive_rating + 1e-6
-        nsfw_ratio = (questionable + explicit) / rating_total
+        exposure_detection = self._max_exposed_detection(nudity)
+        exposure_peak = max(exposure_score, exposure_detection)
+        mild_exposure_peak = self._mild_exposure_peak(nudity)
 
-        violence_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.violence_tags]
-        violence_max = max(violence_scores) if violence_scores else 0.0
-        violence_sum = sum(violence_scores)
-
-        minor_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.minor_tags]
+        minor_scores = [float(general_map.get(tag, 0.0)) for tag in self._minor_tags]
         minors_sum = sum(minor_scores)
         minors_peak = max(minor_scores) if minor_scores else 0.0
 
-        animal_scores = [float(general_map.get(tag, 0.0)) for tag in self.config.animal_tags]
-        animals_sum = sum(animal_scores)
-        animals_max = max(animal_scores) if animal_scores else 0.0
+        violence_scores = [float(general_map.get(tag, 0.0)) for tag in self._violence_tags]
+        violence_sum = sum(violence_scores)
+        violence_max = max(violence_scores) if violence_scores else 0.0
 
-        exposure_det = self._max_exposed_detection(nudity)
-        exposure_peak = max(exposure_score, exposure_det)
+        animal_subject_scores = [float(general_map.get(tag, 0.0)) for tag in self._animal_subject_tags]
+        animal_context_scores = [float(general_map.get(tag, 0.0)) for tag in self._animal_context_tags]
+        animal_peak = max(animal_subject_scores) if animal_subject_scores else 0.0
+        animal_context_peak = max(animal_context_scores) if animal_context_scores else 0.0
+
+        sexual_explicit_sum = 0.0
+        sexual_modifier_sum = 0.0
+        sexual_modifier_hits: List[tuple[str, float]] = []
+        for tag in self._nsfw_tags:
+            score = float(general_map.get(tag, 0.0))
+            if score <= 0.0:
+                continue
+            if tag in SEX_MODIFIER_TAGS:
+                sexual_modifier_sum += score
+                sexual_modifier_hits.append((tag, score))
+            else:
+                sexual_explicit_sum += score
+
+        gore_sum = self._sum_by_tags(general_map, GORE_TAGS)
+        gore_peak = self._peak_by_tags(general_map, GORE_TAGS)
+        dismember_peak = self._peak_by_tags(general_map, DISMEMBER_TAGS)
+
+        drug_score = self._max_substring_score(general_map, DRUG_KEYWORDS)
+
+        thresholds = self.config.thresholds
+        minor_peak_min = float(thresholds.get("minor_peak_min", 0.20))
+        sexual_explicit_sum_med = float(thresholds.get("sexual_explicit_sum_med", 0.10))
+        sexual_explicit_sum_high = float(thresholds.get("sexual_explicit_sum_high", 0.15))
+        sexual_modifier_sum_min = float(thresholds.get("sexual_modifier_sum_min", 0.10))
+        animal_subject_min = float(thresholds.get("animal_subject_min", 0.35))
+        gore_peak_min = float(thresholds.get("gore_peak_min", 0.30))
+        gore_sum_min = float(thresholds.get("gore_sum_min", 0.40))
+        dismember_peak_min = float(thresholds.get("dismember_peak_min", 0.20))
+        mild_exposure_peak_min = float(thresholds.get("mild_exposure_peak_min", self._mild_threshold))
+        drug_any_min = float(thresholds.get("drug_any_min", 0.15))
+
+        sexual_high = (
+            exposure_peak >= float(thresholds.get("exposure_strong", 0.60))
+            or explicit >= float(thresholds.get("wd14_explicit", 0.20))
+            or sexual_explicit_sum >= sexual_explicit_sum_high
+        )
+        sexual_med = (
+            exposure_peak >= float(thresholds.get("exposure_mid", 0.30))
+            or questionable >= float(thresholds.get("wd14_questionable", 0.35))
+            or sexual_explicit_sum >= sexual_explicit_sum_med
+        )
+        sexual_with_modifiers = sexual_modifier_sum >= sexual_modifier_sum_min and (
+            sexual_med or exposure_peak >= float(thresholds.get("exposure_mid", 0.30))
+        )
+        gore_any = gore_peak >= gore_peak_min or gore_sum >= gore_sum_min
+        dismember_hit = dismember_peak >= dismember_peak_min
+        mild_exposure = mild_exposure_peak >= mild_exposure_peak_min or (
+            mild_exposure_peak == 0.0 and questionable >= float(thresholds.get("wd14_questionable", 0.35))
+        )
+        drug_any = drug_score >= drug_any_min
 
         metrics = {
             "questionable": questionable,
@@ -109,66 +299,118 @@ class RuleEngine:
             "nsfw_ratio": nsfw_ratio,
             "nsfw_general_sum": nsfw_general_sum,
             "exposure_score": exposure_score,
-            "exposure_detection": exposure_det,
+            "exposure_detection": exposure_detection,
             "exposure_peak": exposure_peak,
+            "mild_exposure_peak": mild_exposure_peak,
             "placement_risk": placement_risk,
             "violence_max": violence_max,
             "violence_sum": violence_sum,
             "minors_sum": minors_sum,
             "minors_peak": minors_peak,
-            "animals_sum": animals_sum,
-            "animals_max": animals_max,
+            "animals_peak": animal_peak,
+            "animal_context_peak": animal_context_peak,
+            "sexual_explicit_sum": sexual_explicit_sum,
+            "sexual_modifier_sum": sexual_modifier_sum,
+            "gore_peak": gore_peak,
+            "gore_sum": gore_sum,
+            "dismember_peak": dismember_peak,
+            "drug_score": drug_score,
         }
 
-        # RED: Violence/Gore
-        if violence_max >= thresholds.get("gore_any", 0.3) or violence_sum >= thresholds.get("gore_sum", 0.4):
-            reasons = []
-            if violence_max >= thresholds.get("gore_any", 0.3):
-                reasons.append(f"gore_any={violence_max:.2f}")
-            if violence_sum >= thresholds.get("gore_sum", 0.4):
-                reasons.append(f"gore_sum={violence_sum:.2f}")
-            return self._result("red", "RED-201", reasons, metrics)
+        reasons_base: list[str] = []
+        if wd14.get("error") or not rating:
+            reasons_base.append("wd14_missing")
 
-        # RED: Minors
-        if minors_sum >= thresholds.get("wd14_minors_sum", 0.4):
-            reasons = [f"minors_sum={minors_sum:.2f}"]
-            return self._result("red", "RED-301", reasons, metrics)
-
-        # ORANGE: Adult content outside NSFW
-        exposure_strong = thresholds.get("exposure_strong", 0.6)
-        exposure_mid = thresholds.get("exposure_mid", 0.3)
-        nsfw_margin_min = thresholds.get("nsfw_margin_min", 0.0)
-        nsfw_ratio_min = thresholds.get("nsfw_ratio_min", 0.45)
-        nsfw_general_min = thresholds.get("nsfw_general_sum", 0.2)
-
-        adult_core = questionable >= thresholds.get("wd14_questionable", 0.35)
-        adult_balance = nsfw_margin >= nsfw_margin_min or nsfw_ratio >= nsfw_ratio_min
-        adult_context = nsfw_general_sum >= nsfw_general_min or exposure_peak >= exposure_mid
-        strong_exposure = exposure_peak >= exposure_strong
-
-        if not is_nsfw_channel and ((adult_core and adult_balance and adult_context) or strong_exposure):
-            reasons = [
-                f"q={questionable:.2f}",
-                f"margin={nsfw_margin:.2f}",
-                f"ratio={nsfw_ratio:.2f}",
-                f"nsfw_sum={nsfw_general_sum:.2f}",
-                f"exposure={exposure_peak:.2f}",
+        # 1. 非NSFWチャンネル × 性的
+        if not is_nsfw_channel and (sexual_high or sexual_med or sexual_with_modifiers):
+            reasons = reasons_base + [
+                "channel=non-nsfw",
+                f"sexual_high={sexual_high}",
+                f"sexual_med={sexual_med}",
+                f"mod_sum={sexual_modifier_sum:.2f}",
             ]
-            return self._result("orange", "ORANGE-101", reasons, metrics)
+            return self._result("red", "RED-NSFW-101", reasons, metrics)
 
-        # YELLOW: Minor hint or moderate exposure
-        if minors_peak >= thresholds.get("yellow_minor_hint", 0.2):
-            reasons = [f"minor_hint={minors_peak:.2f}"]
-            if exposure_peak > 0:
-                reasons.append(f"exposure={exposure_peak:.2f}")
-            return self._result("yellow", "YELLOW-201", reasons, metrics)
+        # 2. 未成年 × 性的
+        if minors_peak >= minor_peak_min and (sexual_high or sexual_with_modifiers):
+            reasons = reasons_base + [
+                f"minor_peak={minors_peak:.2f}",
+                f"sexual_high={sexual_high}",
+                f"mod_sum={sexual_modifier_sum:.2f}",
+            ]
+            if sexual_modifier_hits:
+                mods = ",".join(tag for tag, _ in sexual_modifier_hits)
+                reasons.append(f"mods={mods}")
+            return self._result("red", "RED-MINOR-SEX-201", reasons, metrics)
 
-        if not is_nsfw_channel and (exposure_peak >= exposure_mid or placement_risk >= thresholds.get("exposure_risk", 0.6)):
-            reasons = [f"exposure={exposure_peak:.2f}", f"placement={placement_risk:.2f}"]
-            return self._result("yellow", "YELLOW-101", reasons, metrics)
+        # 3. 未成年 × ゴア
+        if minors_peak >= minor_peak_min and gore_any:
+            reasons = reasons_base + [
+                f"minor_peak={minors_peak:.2f}",
+                f"gore_peak={gore_peak:.2f}",
+                f"gore_sum={gore_sum:.2f}",
+            ]
+            return self._result("red", "RED-MINOR-GORE-202", reasons, metrics)
 
-        return self._result(DEFAULT_SEVERITY, None, [], metrics)
+        # 4. 動物 × 性的
+        bestiality_hit = animal_context_peak > 0.0 and any(
+            tag in ANIMAL_ABUSE_CONTEXT_TAGS
+            for tag, score in general_map.items()
+            if score > 0.0 and tag in ANIMAL_ABUSE_CONTEXT_TAGS
+        )
+        if animal_peak >= animal_subject_min and (
+            bestiality_hit or (sexual_high and sexual_modifier_sum >= sexual_modifier_sum_min)
+        ):
+            reasons = reasons_base + [
+                f"animal_peak={animal_peak:.2f}",
+                f"bestiality={bestiality_hit}",
+                f"sexual_high={sexual_high}",
+                f"mod_sum={sexual_modifier_sum:.2f}",
+            ]
+            return self._result("red", "RED-ANIMAL-SEX-301", reasons, metrics)
 
+        # 5. 動物 × 虐待/流血
+        if animal_peak >= animal_subject_min and (animal_context_peak > 0.0 or gore_any):
+            reasons = reasons_base + [
+                f"animal_peak={animal_peak:.2f}",
+                f"context_peak={animal_context_peak:.2f}",
+                f"gore_any={gore_any}",
+            ]
+            return self._result("red", "RED-ANIMAL-GORE-302", reasons, metrics)
+
+        # 6. 欠損 × 出血
+        if dismember_hit and gore_any:
+            reasons = reasons_base + [
+                f"dismember={dismember_peak:.2f}",
+                f"gore_peak={gore_peak:.2f}",
+                f"gore_sum={gore_sum:.2f}",
+            ]
+            return self._result("red", "RED-DISMEMBER-BLOOD-401", reasons, metrics)
+
+        # 7. 成人 × 性的 × 薬物（NSFWのみ）
+        if minors_peak < minor_peak_min and (sexual_high or sexual_med or sexual_with_modifiers) and drug_any:
+            reasons = reasons_base + [
+                f"sexual_state={'high' if sexual_high else 'med'}",
+                f"drug_score={drug_score:.2f}",
+            ]
+            if not is_nsfw_channel:
+                # 非NSFWの場合は規約REDが優先しているが、保険で reason を残す。
+                reasons.append("channel=non-nsfw")
+            return self._result("orange", "ORANGE-ADULT-SEX-DRUG-501", reasons, metrics)
+
+        # 8. 未成年 × 軽微露出
+        if minors_peak >= minor_peak_min and mild_exposure and not sexual_high:
+            reasons = reasons_base + [
+                f"minor_peak={minors_peak:.2f}",
+                f"mild_exposure={mild_exposure_peak:.2f}",
+            ]
+            return self._result("orange", "ORANGE-MINOR-MILD-601", reasons, metrics)
+
+        return self._result(DEFAULT_SEVERITY, None, reasons_base, metrics)
+
+    # ------------------------------------------------------------------
+    # ユーティリティ
+    # ------------------------------------------------------------------
     @staticmethod
     def _iter_general_tags(general_tags: Iterable) -> Iterable[tuple[str, float]]:
         for item in general_tags:
@@ -192,6 +434,40 @@ class RuleEngine:
                     max_score = score
         return max_score
 
+    def _mild_exposure_peak(self, nudity: Iterable[Mapping[str, Any]]) -> float:
+        patterns = self._mild_patterns
+        max_score = 0.0
+        for det in nudity or []:
+            label = str(det.get("class", "") or "").upper()
+            if "EXPOSED" not in label or "COVERED" in label:
+                continue
+            if any(pattern in label for pattern in patterns):
+                score = float(det.get("score", 0.0))
+                if score > max_score:
+                    max_score = score
+        return max_score
+
+    @staticmethod
+    def _sum_by_tags(score_map: Mapping[str, float], tags: Iterable[str]) -> float:
+        return sum(float(score_map.get(tag, 0.0)) for tag in tags)
+
+    @staticmethod
+    def _peak_by_tags(score_map: Mapping[str, float], tags: Iterable[str]) -> float:
+        scores = [float(score_map.get(tag, 0.0)) for tag in tags]
+        return max(scores) if scores else 0.0
+
+    @staticmethod
+    def _max_substring_score(score_map: Mapping[str, float], patterns: Sequence[str]) -> float:
+        max_score = 0.0
+        for tag, score in score_map.items():
+            if score <= 0.0:
+                continue
+            for keyword in patterns:
+                if keyword in tag:
+                    if score > max_score:
+                        max_score = float(score)
+        return max_score
+
     def _result(
         self,
         severity: str,
@@ -207,3 +483,10 @@ class RuleEngine:
             reasons=reasons,
             metrics=metrics,
         )
+
+
+def _normalize_tag(name: str) -> str:
+    value = str(name)
+    if value in KEEP_UNDERSCORE:
+        return value
+    return value.replace("_", " ")

@@ -203,6 +203,29 @@ class TicketStore:
         await cursor.close()
         return [self._row_to_ticket(row) for row in rows]
 
+    async def fetch_active_tickets(self) -> list[Ticket]:
+        """List tickets awaiting deletion (status=notified)."""
+        db = await self._require_db()
+        cursor = await db.execute(
+            "SELECT * FROM tickets WHERE status=? ORDER BY due_at ASC",
+            ("notified",),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._row_to_ticket(row) for row in rows]
+
+    async def cancel_ticket(self, ticket_id: str, actor_id: int) -> Optional[Ticket]:
+        """Mark a ticket as cancelled and record the action."""
+        ticket = await self.update_status(ticket_id, status="cancelled")
+        if ticket is not None:
+            await self.append_log(
+                ticket_id=ticket_id,
+                actor_id=actor_id,
+                action="cancel",
+                detail="モデレーターがキャンセル",
+            )
+        return ticket
+
     async def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:
             await self.connect()
