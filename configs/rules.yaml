@@ -45,25 +45,23 @@ violence_tags:
   - blood
   - guts
   - wound
-  - open_wound
   - severed_arm
   - severed_leg
   - severed_head
   - decapitation
   - disembowelment
-  - skull
-  - bone
   - dismemberment
   - guro
   - ryona
+  - death
+  - corpse
+  - injury
+  - cuts
   - bruise
   - scar
   - torture
   - whipping
   - burn
-  - crying
-  - pain
-  - fight
   - murder
   - strangulation
   - asphyxiation
@@ -73,12 +71,10 @@ violence_tags:
   - stab
   - slash
   - gunshot
-  - explosion
   - cannibalism
-  - corpse
-  - zombie
-  - fear
-  - scream
+  - vore
+  - mutilation
+  - necrophilia
   - abuse
   - bullying
   - rape
@@ -93,71 +89,56 @@ violence_tags:
   - heroin
   - meth
   - lsd
-  - ecstasy
-  - smoking
   - addiction
 
 nsfw_general_tags:
-  - bikini
-  - lingerie
-  - underwear
-  - panties
-  - bra
-  - swimsuit
-  - swimwear
-  - naked
   - nude
   - topless
   - bottomless
-  - see_through
-  - breasts
-  - cleavage
   - nipples
-  - areola
   - penis
-  - vagina
-  - pubic_hair
-  - cameltoe
-  - groping
-  - sex
-  - erotic
-  - thong
-  - bodysuit
-  - latex
-  - pasties
-  - explicit
-  - aroused
+  - testicles
   - pussy
-  - ass
-  - anal
-  - orgasm
-  - masturbation
-  - bondage
+  - clitoris
+  - cameltoe
+  - cleft_of_venus
   - futanari
-  - oral
-  - blowjob
-  - cunnilingus
-  - vaginal
-  - penetration
-  - ejaculation
+  - anus
+  - pubic_hair
+  - uncensored
+  - censored
+  - mosaic_censoring
   - cum
-  - semen
-  - tentacles
+  - pussy_juice
+  - pee
+  - scat
+  - sex
+  - vaginal
+  - anal
+  - oral
+  - paizuri
+  - fellatio
+  - cunnilingus
+  - penetration
+  - masturbation
+  - ejaculation
+  - orgasm
+  - group_sex
+  - gangbang
+  - orgy
+  - rape
+  - bondage
+  - sex_toy
   - dildo
   - vibrator
+  - object_insertion
   - bdsm
   - spanking
   - collar
   - leash
   - slave
-  - gangbang
-  - orgy
-  - incest
   - lactation
   - pregnant
-  - wet
-  - sweat
-  - saliva
 
 animal_abuse_tags:
   - animal_abuse

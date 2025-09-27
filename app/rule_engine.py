@@ -63,7 +63,10 @@ class RuleEngine:
         wd14 = analysis.get("wd14", {})
         rating = wd14.get("rating", {})
         general_tags = wd14.get("general", [])
-        general_map = {tag: score for tag, score in self._iter_general_tags(general_tags)}
+        general_map = {
+            _normalize_tag(tag): score
+            for tag, score in self._iter_general_tags(general_tags)
+        }
         xsignals = analysis.get("xsignals", {})
         nudity = analysis.get("nudity_detections", [])
         is_nsfw_channel = bool(analysis.get("is_nsfw_channel"))

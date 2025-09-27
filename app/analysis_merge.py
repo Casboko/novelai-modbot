@@ -196,8 +196,8 @@ def compute_placement_risk(
             continue
         if tag is None or score is None:
             continue
-        tag = str(tag)
-        if tag in nsfw_tags:
+        tag_norm = _normalize_tag(str(tag))
+        if tag_norm in nsfw_tags:
             scores.append(float(score))
     general_component = 0.0
     if scores:

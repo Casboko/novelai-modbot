@@ -65,19 +65,30 @@ class WD14Session:
         self.size = int(height)
 
     def preprocess(self, image: Image.Image) -> np.ndarray:
-        rgb_image = image.convert("RGB")
+        if image.mode in {"RGBA", "LA"} or (
+            image.mode == "P" and image.info.get("transparency") is not None
+        ):
+            rgba_image = image.convert("RGBA")
+            background = Image.new("RGBA", rgba_image.size, (255, 255, 255, 255))
+            rgb_image = Image.alpha_composite(background, rgba_image).convert("RGB")
+        else:
+            rgb_image = image.convert("RGB")
+
         width, height = rgb_image.size
         side = max(width, height)
-        canvas = Image.new("RGB", (side, side), (255, 255, 255))
-        offset = ((side - width) // 2, (side - height) // 2)
-        canvas.paste(rgb_image, offset)
-        resized = canvas.resize((self.size, self.size), Image.BILINEAR)
+        letterboxed = Image.new("RGB", (side, side), (255, 255, 255))
+        letterboxed.paste(
+            rgb_image,
+            ((side - width) // 2, (side - height) // 2),
+        )
+        resized = letterboxed.resize((self.size, self.size), Image.BICUBIC)
+
         arr = np.asarray(resized, dtype=np.float32)
-        arr = arr[..., ::-1]  # RGB -> BGR
-        arr /= 255.0
+        # Ensure BGR channel order
+        arr = arr[:, :, ::-1].copy()
         if self.layout == "NCHW":
             arr = np.transpose(arr, (2, 0, 1))
-        return arr
+        return np.ascontiguousarray(arr, dtype=np.float32)
 
     def infer(self, batch: Sequence[Image.Image]) -> np.ndarray:
         if not batch:
