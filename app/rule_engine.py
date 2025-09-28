@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
+
+from .engine.dsl import DslEvaluationInput, DslEvaluationOutcome, DslProgram, SEVERITY_ORDER
+from .engine.tag_norm import normalize_tag as dsl_normalize_tag
 
 DEFAULT_SEVERITY = "green"
 DEFAULT_RULES_PATH = "configs/rules.yaml"
@@ -115,6 +118,22 @@ class RuleConfig:
     animal_tags: List[str]
     xsignal_weights: Dict[str, float]
     rule_titles: Dict[str, str]
+    version: int = 1
+    dsl_groups: Dict[str, List[str]] = field(default_factory=dict)
+    dsl_features: Dict[str, str] = field(default_factory=dict)
+    dsl_rules: List[Dict[str, Any]] = field(default_factory=list)
+    dsl_mode: str = "warn"
+
+
+@dataclass(slots=True)
+class PreparedContext:
+    rating: Dict[str, float]
+    tag_scores: Dict[str, float]
+    nude_flags: Tuple[str, ...]
+    is_nsfw_channel: bool
+    is_spoiler: bool
+    attachment_count: int
+    metrics: Dict[str, float]
 
 
 @dataclass(slots=True)
@@ -123,7 +142,7 @@ class EvaluationResult:
     rule_id: Optional[str]
     rule_title: Optional[str]
     reasons: List[str]
-    metrics: Dict[str, float]
+    metrics: Dict[str, Any]
 
 
 class RuleEngine:
@@ -154,6 +173,16 @@ class RuleEngine:
         self._mild_patterns, self._mild_threshold = self._load_mild_exposure_settings(
             nudenet_config_path or DEFAULT_NUDENET_CONFIG_PATH
         )
+        self._dsl_program: DslProgram | None = None
+        if self.config.version >= 2 and self.config.dsl_rules:
+            mode = (self.config.dsl_mode or "warn").strip().lower()
+            strict = mode == "strict"
+            self._dsl_program = DslProgram.from_config(
+                groups=self.config.dsl_groups,
+                features=self.config.dsl_features,
+                rules=self.config.dsl_rules,
+                strict=strict,
+            )
 
     # ------------------------------------------------------------------
     # 設定ロード
@@ -166,6 +195,12 @@ class RuleEngine:
         def normalize_list(items: Iterable[str]) -> List[str]:
             return [_normalize_tag(item) for item in items if isinstance(item, str)]
 
+        version = int(data.get("version", 1))
+        groups = data.get("groups") if version >= 2 else {}
+        features = data.get("features") if version >= 2 else {}
+        rules = data.get("rules") if version >= 2 else []
+        dsl_mode = str(data.get("dsl_mode", "warn")) if version >= 2 else "warn"
+
         return RuleConfig(
             wd14_repo=data.get("models", {}).get("wd14_repo", ""),
             thresholds=data.get("thresholds", {}),
@@ -175,6 +210,11 @@ class RuleEngine:
             animal_tags=normalize_list(data.get("animal_abuse_tags", [])),
             xsignal_weights=data.get("xsignals_weights", {}),
             rule_titles=data.get("rule_titles", {}),
+            version=version,
+            dsl_groups={str(k): list(v or []) for k, v in (groups or {}).items()} if isinstance(groups, Mapping) else {},
+            dsl_features={str(k): str(v) for k, v in (features or {}).items()} if isinstance(features, Mapping) else {},
+            dsl_rules=[dict(rule) for rule in (rules or []) if isinstance(rule, Mapping)] if isinstance(rules, Sequence) else [],
+            dsl_mode=dsl_mode,
         )
 
     @staticmethod
@@ -198,13 +238,28 @@ class RuleEngine:
     # メイン評価
     # ------------------------------------------------------------------
     def evaluate(self, analysis: Mapping[str, Any]) -> EvaluationResult:
+        legacy_result, context = self._evaluate_legacy(analysis)
+        if not self._dsl_program:
+            return legacy_result
+        dsl_outcome = self._evaluate_dsl(context)
+        if not dsl_outcome:
+            return legacy_result
+        return self._merge_results(legacy_result, dsl_outcome)
+
+    def _evaluate_legacy(self, analysis: Mapping[str, Any]) -> tuple[EvaluationResult, PreparedContext]:
         wd14 = analysis.get("wd14") or {}
         rating = wd14.get("rating") or {}
         general_tags = wd14.get("general") or []
+        general_entries = list(self._iter_general_tags(general_tags))
         general_map = {
-            _normalize_tag(tag).lower(): score
-            for tag, score in self._iter_general_tags(general_tags)
+            _normalize_tag(tag).lower(): score for tag, score in general_entries
         }
+        normalized_tag_scores = {}
+        for tag, score in general_entries:
+            normalized = dsl_normalize_tag(tag)
+            if not normalized:
+                continue
+            normalized_tag_scores[normalized] = float(score)
         xsignals = analysis.get("xsignals", {})
         nudity = analysis.get("nudity_detections", [])
         is_nsfw_channel = bool(analysis.get("is_nsfw_channel"))
@@ -317,10 +372,46 @@ class RuleEngine:
             "drug_score": drug_score,
         }
 
+        messages = analysis.get("messages", []) or []
+        attachment_count = 0
+        is_spoiler = bool(analysis.get("is_spoiler", False))
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            attachment_count += len(message.get("attachments", []) or [])
+            if message.get("is_spoiler"):
+                is_spoiler = True
+            for attachment in message.get("attachments", []) or []:
+                if isinstance(attachment, Mapping) and attachment.get("is_spoiler"):
+                    is_spoiler = True
+
+        nude_flags: tuple[str, ...] = tuple(
+            str(det.get("class", "")).upper()
+            for det in nudity
+            if isinstance(det, Mapping) and det.get("class")
+        )
+
+        rating_map: Dict[str, float] = {
+            str(key): float(value)
+            for key, value in rating.items()
+            if isinstance(value, (int, float))
+        }
+        for key in ("explicit", "questionable", "general", "sensitive", "safe"):
+            rating_map.setdefault(key, 0.0)
+
+        prepared = PreparedContext(
+            rating=rating_map,
+            tag_scores=normalized_tag_scores,
+            nude_flags=nude_flags,
+            is_nsfw_channel=is_nsfw_channel,
+            is_spoiler=is_spoiler,
+            attachment_count=attachment_count,
+            metrics=metrics,
+        )
+
         reasons_base: list[str] = []
         if wd14.get("error") or not rating:
             reasons_base.append("wd14_missing")
-
         # 1. 非NSFWチャンネル × 性的
         if not is_nsfw_channel and (sexual_high or sexual_med or sexual_with_modifiers):
             reasons = reasons_base + [
@@ -329,7 +420,7 @@ class RuleEngine:
                 f"sexual_med={sexual_med}",
                 f"mod_sum={sexual_modifier_sum:.2f}",
             ]
-            return self._result("red", "RED-NSFW-101", reasons, metrics)
+            return self._result("red", "RED-NSFW-101", reasons, metrics), prepared
 
         # 2. 未成年 × 性的
         if minors_peak >= minor_peak_min and (sexual_high or sexual_with_modifiers):
@@ -341,7 +432,7 @@ class RuleEngine:
             if sexual_modifier_hits:
                 mods = ",".join(tag for tag, _ in sexual_modifier_hits)
                 reasons.append(f"mods={mods}")
-            return self._result("red", "RED-MINOR-SEX-201", reasons, metrics)
+            return self._result("red", "RED-MINOR-SEX-201", reasons, metrics), prepared
 
         # 3. 未成年 × ゴア
         if minors_peak >= minor_peak_min and gore_any:
@@ -350,7 +441,7 @@ class RuleEngine:
                 f"gore_peak={gore_peak:.2f}",
                 f"gore_sum={gore_sum:.2f}",
             ]
-            return self._result("red", "RED-MINOR-GORE-202", reasons, metrics)
+            return self._result("red", "RED-MINOR-GORE-202", reasons, metrics), prepared
 
         # 4. 動物 × 性的
         bestiality_hit = animal_context_peak > 0.0 and any(
@@ -367,7 +458,7 @@ class RuleEngine:
                 f"sexual_high={sexual_high}",
                 f"mod_sum={sexual_modifier_sum:.2f}",
             ]
-            return self._result("red", "RED-ANIMAL-SEX-301", reasons, metrics)
+            return self._result("red", "RED-ANIMAL-SEX-301", reasons, metrics), prepared
 
         # 5. 動物 × 虐待/流血
         if animal_peak >= animal_subject_min and (animal_context_peak > 0.0 or gore_any):
@@ -376,7 +467,7 @@ class RuleEngine:
                 f"context_peak={animal_context_peak:.2f}",
                 f"gore_any={gore_any}",
             ]
-            return self._result("red", "RED-ANIMAL-GORE-302", reasons, metrics)
+            return self._result("red", "RED-ANIMAL-GORE-302", reasons, metrics), prepared
 
         # 6. 欠損 × 出血
         if dismember_hit and gore_any:
@@ -385,7 +476,7 @@ class RuleEngine:
                 f"gore_peak={gore_peak:.2f}",
                 f"gore_sum={gore_sum:.2f}",
             ]
-            return self._result("red", "RED-DISMEMBER-BLOOD-401", reasons, metrics)
+            return self._result("red", "RED-DISMEMBER-BLOOD-401", reasons, metrics), prepared
 
         # 7. 成人 × 性的 × 薬物（NSFWのみ）
         if minors_peak < minor_peak_min and (sexual_high or sexual_med or sexual_with_modifiers) and drug_any:
@@ -396,7 +487,7 @@ class RuleEngine:
             if not is_nsfw_channel:
                 # 非NSFWの場合は規約REDが優先しているが、保険で reason を残す。
                 reasons.append("channel=non-nsfw")
-            return self._result("orange", "ORANGE-ADULT-SEX-DRUG-501", reasons, metrics)
+            return self._result("orange", "ORANGE-ADULT-SEX-DRUG-501", reasons, metrics), prepared
 
         # 8. 未成年 × 軽微露出
         if minors_peak >= minor_peak_min and mild_exposure and not sexual_high:
@@ -404,9 +495,85 @@ class RuleEngine:
                 f"minor_peak={minors_peak:.2f}",
                 f"mild_exposure={mild_exposure_peak:.2f}",
             ]
-            return self._result("orange", "ORANGE-MINOR-MILD-601", reasons, metrics)
+            return self._result("orange", "ORANGE-MINOR-MILD-601", reasons, metrics), prepared
 
-        return self._result(DEFAULT_SEVERITY, None, reasons_base, metrics)
+        return self._result(DEFAULT_SEVERITY, None, reasons_base, metrics), prepared
+
+    def _evaluate_dsl(self, context: PreparedContext) -> DslEvaluationOutcome | None:
+        if not self._dsl_program:
+            return None
+        inputs = DslEvaluationInput(
+            rating=context.rating,
+            metrics=context.metrics,
+            tag_scores=context.tag_scores,
+            group_patterns=self._dsl_program.group_patterns,
+            nude_flags=context.nude_flags,
+            is_nsfw_channel=context.is_nsfw_channel,
+            is_spoiler=context.is_spoiler,
+            attachment_count=context.attachment_count,
+        )
+        return self._dsl_program.evaluate(inputs)
+
+    def _merge_results(
+        self,
+        legacy: EvaluationResult,
+        dsl_outcome: DslEvaluationOutcome,
+    ) -> EvaluationResult:
+        severity_rank = SEVERITY_ORDER
+        legacy_rank = severity_rank.get(legacy.severity, 0)
+        dsl_rank = severity_rank.get(dsl_outcome.severity, 0)
+
+        legacy_priority = 100
+        dsl_priority = dsl_outcome.priority
+
+        winner = "legacy"
+        if dsl_rank > legacy_rank:
+            winner = "dsl"
+        elif dsl_rank == legacy_rank and dsl_priority < legacy_priority:
+            winner = "dsl"
+
+        metrics = dict(legacy.metrics)
+        metrics["dsl"] = {
+            "rule_id": dsl_outcome.rule_id,
+            "severity": dsl_outcome.severity,
+            "priority": dsl_outcome.priority,
+            **dsl_outcome.diagnostics,
+            "reasons": dsl_outcome.reasons,
+            "matched": True,
+        }
+
+        if winner == "dsl":
+            primary_reasons = list(dsl_outcome.reasons)
+            secondary_reasons = legacy.reasons
+            severity = dsl_outcome.severity
+            rule_id = dsl_outcome.rule_id
+            rule_title = self.config.rule_titles.get(rule_id)
+            priority = dsl_priority
+        else:
+            primary_reasons = list(legacy.reasons)
+            secondary_reasons = dsl_outcome.reasons
+            severity = legacy.severity
+            rule_id = legacy.rule_id
+            rule_title = legacy.rule_title
+            priority = legacy_priority
+
+        extras = [reason for reason in secondary_reasons if reason not in primary_reasons][:2]
+        merged_reasons = primary_reasons + extras
+
+        metrics["winning"] = {
+            "origin": winner,
+            "severity": severity,
+            "rule_id": rule_id,
+            "priority": priority,
+        }
+
+        return EvaluationResult(
+            severity=severity,
+            rule_id=rule_id,
+            rule_title=rule_title,
+            reasons=merged_reasons,
+            metrics=metrics,
+        )
 
     # ------------------------------------------------------------------
     # ユーティリティ
@@ -473,7 +640,7 @@ class RuleEngine:
         severity: str,
         rule_id: Optional[str],
         reasons: List[str],
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
     ) -> EvaluationResult:
         title = self.config.rule_titles.get(rule_id) if rule_id else None
         return EvaluationResult(

@@ -69,6 +69,29 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
 ## テスト指針
 現時点で自動テストスイートは未整備です。新規機能を追加する際は `tests/` ディレクトリを作成し `pytest` ベースのテストを導入してください。I/O を伴う処理は Discord クライアントや Hugging Face API をモックし、副作用のないユニットテストを優先します。主要フローごとに `test_<module>.py` 形式で命名し、スキャンからルール評価までのハッピーパスと代表的なエラーケースを最低限カバーしてください。回帰を防ぐため、重い推論は `monkeypatch` でキャッシュ層にスタブを挿入し、データサンプルは `tests/fixtures/` に配置しましょう。
 
+## DSL レイヤ導入の進め方
+- `configs/rules.yaml` に `version: 2` を記載すると DSL が有効になり、既存ロジックと併用されます（未指定/`1` は従来どおり）。
+- DSL では `groups`（タグ/ワイルドカード定義）、`features`（中間式）、`rules`（when/reasons）を記述します。例:
+  ```yaml
+  version: 2
+  groups:
+    nsfw_general: ["bikini", "see_through", "underboob"]
+  features:
+    combo: "rating.explicit * exposure_peak"
+  rules:
+    - id: RED-NSFW-101
+      severity: red
+      priority: 10
+      when: "(!channel.is_nsfw) && (rating.explicit >= 0.6 || sum('nsfw_general') >= 0.25)"
+      reasons: ["exp={rating.explicit:.2f}", "sum={sum('nsfw_general'):.2f}"]
+  ```
+- 利用可能な変数・関数
+  - 変数: `rating.*`, `exposure_peak`, `minors_peak`, `channel.is_nsfw`, `message.is_spoiler`, `attachment_count` など（既存メトリクスは `metrics` 経由で DSL にバインド済み）。
+  - 関数: `score(tag)`, `sum(group)`, `max(group)`, `any(group, gt=0.35)`, `count(group, gt=0.35)`, `clamp(x, lo, hi)`, `nude.has(flag)`, `nude.any(prefix="EXPOSED_", min=1)` など。
+- `app/engine/` 配下に Safe AST ベースの DSL ランタイムを実装済み。`DslProgram.evaluate()` の結果は `metrics.dsl` / `metrics.winning` に格納され、最終 `severity` は legacy と DSL の強度を比較して決定されます。
+- 厳格モードが必要な場合は `dsl_mode: strict` を `rules.yaml` に追加すると未知変数やゼロ除算で即エラーになります（既定は `warn` モードで 0/False にフォールバック）。
+- DSL の単体テストは `tests/engine/test_dsl_program.py` を参考に追加してください。主要ケース（命中、非命中、安全性と禁止ノード）を網羅することが推奨です。
+
 ## コミットとプルリクエスト
 コミットメッセージは `feat(scope): summary` 形式の Conventional Commits が利用されています。変更内容と影響範囲を明確にするため `fix`, `chore`, `docs` なども適宜活用してください。プルリクエストには目的、主な変更点、検証ログ (`python -m app.cli_scan --help` など) を記載し、関連 issue やチケット番号をリンクします。レビューではキャッシュ破棄の有無や Discord API 制限への影響を説明し、Discord 出力や通知内容を変更した場合はスクリーンショット、サンプルログ、生成 CSV の抜粋を添付してください。
 
