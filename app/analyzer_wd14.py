@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -32,10 +33,8 @@ class WD14Session:
         if threads and threads > 0:
             sess_options.intra_op_num_threads = threads
             sess_options.inter_op_num_threads = max(1, threads // 2)
-        provider = provider.lower()
-        providers = ["CPUExecutionProvider"]
-        if provider == "openvino":
-            providers = ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+        provider = (provider or "cpu").lower()
+        providers = self._select_providers(provider)
         self.session = ort.InferenceSession(
             model_path,
             sess_options=sess_options,
@@ -89,6 +88,44 @@ class WD14Session:
         if self.layout == "NCHW":
             arr = np.transpose(arr, (2, 0, 1))
         return np.ascontiguousarray(arr, dtype=np.float32)
+
+    def _select_providers(self, provider: str) -> list[str]:
+        logger = logging.getLogger(__name__)
+        available = ort.get_available_providers()
+
+        desired: list[str]
+        if provider in {"tensorrt", "trt"}:
+            desired = [
+                "TensorrtExecutionProvider",
+                "CUDAExecutionProvider",
+                "OpenVINOExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+        elif provider in {"cuda", "gpu"}:
+            desired = [
+                "CUDAExecutionProvider",
+                "OpenVINOExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+        elif provider == "openvino":
+            desired = ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+        else:
+            desired = ["CPUExecutionProvider"]
+
+        available_set = set(available)
+        providers = [ep for ep in desired if ep in available_set]
+        if not providers:
+            providers = ["CPUExecutionProvider"]
+
+        selected = providers[0]
+        if provider in {"tensorrt", "trt"} and "TensorrtExecutionProvider" not in providers:
+            logger.warning("[WD14] TensorRT EP not available. Falling back to %s", selected)
+        elif provider in {"cuda", "gpu"} and "CUDAExecutionProvider" not in providers:
+            logger.warning("[WD14] CUDA EP not available. Falling back to %s", selected)
+        elif provider == "openvino" and "OpenVINOExecutionProvider" not in providers:
+            logger.warning("[WD14] OpenVINO EP not available. Falling back to %s", selected)
+
+        return providers
 
     def infer(self, batch: Sequence[Image.Image]) -> np.ndarray:
         if not batch:

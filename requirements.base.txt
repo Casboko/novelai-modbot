@@ -1,0 +1,12 @@
+discord.py>=2.4
+Pillow
+imagehash
+numpy
+nudenet
+python-dotenv
+pydantic
+pydantic-settings
+pandas
+huggingface_hub
+PyYAML
+aiosqlite

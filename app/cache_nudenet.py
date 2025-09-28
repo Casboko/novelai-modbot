@@ -18,10 +18,14 @@ class NudeNetCache:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._configured = False
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=60.0)
+        if not self._configured:
+            self._configure(conn)
+        return conn
 
     def _initialize(self) -> None:
         with self._connect() as conn:
@@ -36,6 +40,12 @@ class NudeNetCache:
                 )
                 """
             )
+
+    def _configure(self, conn: sqlite3.Connection) -> None:
+        cursor = conn.execute("PRAGMA journal_mode=WAL")
+        cursor.fetchone()
+        conn.execute("PRAGMA synchronous=NORMAL")
+        self._configured = True
 
     def get(self, key: CacheKey) -> Optional[dict[str, Any]]:
         with self._connect() as conn:

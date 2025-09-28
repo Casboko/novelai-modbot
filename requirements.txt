@@ -1,13 +1,2 @@
-discord.py>=2.4
-Pillow
-imagehash
-numpy
-onnxruntime>=1.17.0
-nudenet
-python-dotenv
-pydantic
-pydantic-settings
-pandas
-huggingface_hub
-PyYAML
-aiosqlite
+# Default to CPU profile; switch to requirements-gpu.txt on CUDA/TensorRT hosts.
+-r requirements-cpu.txt

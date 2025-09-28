@@ -4,13 +4,19 @@ import argparse
 import asyncio
 import csv
 import json
+import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from dotenv import load_dotenv
 from PIL import Image
 import yaml
+
+load_dotenv()
 
 from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
 from .batch_loader import ImageLoadResult, ImageRequest, load_images
@@ -27,6 +33,8 @@ class Entry:
 
 
 KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
+DEFAULT_CACHE_PATH = Path("app/cache_wd14.sqlite")
+LOG_LEVEL_CHOICES = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 
 
 def normalize_tag_name(tag: str) -> str:
@@ -53,13 +61,22 @@ def load_rules_nsfw_tags(path: Path) -> set[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WD14 EVA02 batch inference")
+    default_provider = os.getenv("WD14_PROVIDER", "cpu")
+    log_level_default = os.getenv("LOG_LEVEL")
+    if log_level_default:
+        log_level_default = log_level_default.upper()
     parser.add_argument("--input", type=Path, default=Path("out/p0_scan.csv"))
     parser.add_argument("--out", type=Path, default=Path("out/p1_wd14.jsonl"))
     parser.add_argument("--metrics", type=Path, default=Path("out/p1_wd14_metrics.json"))
-    parser.add_argument("--cache", type=Path, default=Path("app/cache_wd14.sqlite"))
+    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
     parser.add_argument("--model-id", type=str, default=REPO_ID)
     parser.add_argument("--model-revision", type=str, default="main")
-    parser.add_argument("--provider", type=str, default="cpu", choices=["cpu", "openvino"])
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=default_provider,
+        choices=["cpu", "openvino", "cuda", "tensorrt"],
+    )
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--general-threshold", type=float, default=0.35)
     parser.add_argument("--character-threshold", type=float, default=0.85)
@@ -69,6 +86,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--qps", type=float, default=5.0)
     parser.add_argument("--limit", type=int, default=0, help="Optional limit on number of unique pHashes")
+    parser.add_argument(
+        "--log-level",
+        type=lambda value: value.upper(),
+        choices=LOG_LEVEL_CHOICES,
+        default=log_level_default,
+        help="Optional logging level override",
+    )
     return parser.parse_args()
 
 
@@ -149,6 +173,15 @@ def build_payload(
 
 async def run() -> None:
     args = parse_args()
+
+    if args.log_level:
+        logging.basicConfig(level=getattr(logging, args.log_level, logging.WARNING))
+
+    cache_suffix = os.getenv("WD14_CACHE_SUFFIX", "").strip()
+    if cache_suffix and args.cache == DEFAULT_CACHE_PATH:
+        cache_name = f"{DEFAULT_CACHE_PATH.stem}_{cache_suffix}{DEFAULT_CACHE_PATH.suffix}"
+        args.cache = DEFAULT_CACHE_PATH.with_name(cache_name)
+
     entries = load_entries(args.input, args.limit)
     if not entries:
         raise SystemExit("No entries found in CSV. Did you run p0 scan?")
@@ -172,6 +205,9 @@ async def run() -> None:
     failures: dict[str, str] = {}
 
     all_phashes = list(entries.keys())
+
+    total_infer_seconds = 0.0
+    inferred_images = 0
 
     for phash in all_phashes:
         key = CacheKey(phash=phash, model=args.model_id, revision=args.model_revision)
@@ -198,7 +234,10 @@ async def run() -> None:
         successful_results: list[ImageLoadResult] = [r for r in results if r.image is not None]
         images: list[Image.Image] = [r.image for r in successful_results]
         if images:
+            start = time.perf_counter()
             predictions = analyzer.predict(images)
+            total_infer_seconds += time.perf_counter() - start
+            inferred_images += len(images)
         else:
             predictions = []
         for result, prediction in zip(successful_results, predictions):
@@ -250,7 +289,14 @@ async def run() -> None:
         "model": args.model_id,
         "revision": args.model_revision,
         "input_size": session.size,
+        "images_processed": inferred_images,
     }
+    if inferred_images > 0 and total_infer_seconds > 0.0:
+        metrics["infer_ms_avg"] = (total_infer_seconds * 1000.0) / inferred_images
+        metrics["img_per_sec"] = inferred_images / total_infer_seconds
+    else:
+        metrics["infer_ms_avg"] = 0.0
+        metrics["img_per_sec"] = 0.0
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
     args.metrics.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 

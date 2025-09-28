@@ -6,7 +6,7 @@
 - `models/wd14/` は WD14 EVA02 重みとラベル情報のキャッシュ置き場です。初回推論時に自動的にダウンロードされ、差し替えはリビジョン指定で制御します。
 - `out/` はスキャン結果や生成 CSV を置くためのワークスペースで、各フェーズごとの中間成果物を確認できます。
 - `docs/` とルート直下の P0/P1/P2 文書は運用手順の補足資料であり、作業スケジュールやエスカレーションの参考になります。
-- ルートの `requirements.txt` が公式依存関係リスト、`app/cache_*.sqlite` が推論キャッシュです。削除すると再推論が走ります。
+- 依存は `requirements.base.txt`（共通）と `requirements-cpu.txt` / `requirements-gpu.txt`（いずれか片方を使用）に分離されています。`requirements.txt` は CPU プロファイルを指し、`app/cache_*.sqlite` が推論キャッシュです。削除すると再推論が走ります。
 
 ## ビルド・テスト・開発コマンド
 - `python -m app.p0_scan --since 2024-01-01 --out out/p0_scan.csv` : Discord から添付ファイルを収集し CSV を蓄積します (`.env` のトークン必須)。
@@ -15,6 +15,53 @@
 - `python -m app.cli_scan --analysis out/p2_analysis.jsonl --findings out/p3_findings.jsonl` : ルール評価を行いサマリーを表示します。
 - `python -m app.cli_report --findings out/p3_findings.jsonl --severity red` : CSV レポートを作成し、重大度フィルタ付きでエクスポートします。
 - `python -m app.cli_report --help` や `python -m app.cli_scan --help` を実行し、追加オプションやチャンネルフィルタを確認してください。
+
+## GPU 実行クイックスタート（WD14）
+- 依存導入は必ずどちらか一方のみを選択します。
+  - CPU 環境: `pip install -r requirements-cpu.txt`
+  - GPU 環境 (CUDA/TensorRT): `pip install -r requirements-gpu.txt`
+- 実行前に `python -c "import onnxruntime as ort; print(ort.get_available_providers())"` で `CUDAExecutionProvider` や `TensorrtExecutionProvider` が列挙されることを確認してください。
+- GPU 実行例:
+  `python -m app.cli_wd14 --input out/p0/shard_00.csv --out out/p1/p1_wd14_00.jsonl --metrics out/metrics/p1_00.json --provider cuda --batch-size 48 --concurrency 24 --qps 4.0`
+- `WD14_PROVIDER`（既定 `cpu`）で CLI 未指定時のプロバイダを切り替えられます。環境に CUDA/TensorRT が存在しない場合は WARN を 1 度だけ出して自動的に CPU へフォールバックします。
+- メトリクス JSON (`--metrics`) には `infer_ms_avg` と `img_per_sec` が追加されており、CPU/GPU の性能比較に利用できます。必要に応じて `.env` の `WD14_CACHE_SUFFIX` を設定すると WD14 キャッシュファイルを分岐できます。
+
+## シャーディング実行フロー（20,000枚規模）
+1. **分割**: `python scripts/split_index.py --input out/p0_scan.csv --out-dir out/p0 --shards 10`
+2. **p1 (WD14)**:
+   ```bash
+   python scripts/run_p1_sharded.py \
+     --shard-glob "out/p0/shard_*.csv" \
+     --out-dir out \
+     --provider cuda --batch-size 48 --concurrency 24 --qps 4.0 \
+     --parallel 2 --resume \
+     --status-file out/status/p1_manifest.json
+   ```
+   - `.tmp` ファイルは完了時に自動 rename（失敗時は残置）。
+   - `--resume` を付けると既存の最終ファイルをスキップし、途中停止後の再開が可能です。
+   - 429 や 5xx が多い場合は `--qps` を下げるか `--parallel 1` に落として調整します。
+3. **p2 (analysis merge)**:
+   ```bash
+   python scripts/run_p2_sharded.py \
+     --shard-glob "out/p0/shard_*.csv" \
+     --wd14-dir out/p1 \
+     --out-dir out \
+     --qps 4.0 --concurrency 16 \
+     --parallel 2 --resume \
+     --status-file out/status/p2_manifest.json \
+     --extra-args "--nudenet-mode auto"
+   ```
+4. **マージ（任意）**:
+   ```bash
+   python scripts/merge_jsonl.py --glob "out/p1/p1_wd14_*.jsonl" --out out/p1/p1_wd14_all.jsonl
+   python scripts/merge_jsonl.py --glob "out/p2/p2_analysis_*.jsonl" --out out/p2/p2_analysis_all.jsonl
+   ```
+
+- 各ランナーは manifest JSON を更新し、`queued/running/done/failed` を追跡します。ファイルは `out/status/` に保存され、再実行時も引き継がれます。
+- SQLite キャッシュは WAL + 60 秒 timeout に設定済みですが、ロック待ちが発生する場合は `--parallel 1` に落として運用してください。
+- 失敗 shard は末尾で 1 回リトライします。複数回失敗する場合は manifest を確認し、`--resume` 付きでもう一度実行すると該当 shard のみが再試行されます。
+- `--extra-args "--nudenet-mode auto"` を指定すると、p2 での NudeNet 実行を WD14 スコアに基づいてゲートできます。`auto`（既定）は `rating.questionable ≥ 0.35` または `rating.explicit ≥ 0.20` のときのみ推論を実行し、`always` は全件実行、`never` はキャッシュヒット以外をスキップします。
+- メトリクスには従来の `average_nudenet_latency_ms` / `from_cache` に加えて、`nudenet.executed` / `nudenet.skipped` / `nudenet.p95_latency_ms` などの詳細指標が出力されます。ゲート調整時は `nudenet.executed` と `nudenet.skipped` を並行して確認してください。
 
 ## コーディングスタイルと命名規約
 Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹底してください。関数・変数は snake_case、クラスは PascalCase で統一し、型ヒントと `from __future__ import annotations` を前提に遅延評価を維持します。自動整形ツールは同梱されていないため、`ruff` や `black` をローカルで実行し差分がない状態でコミットしてください。非同期処理では `asyncio` ループのキャンセル管理が重要なので、タイムアウト値や `RateLimiter` 利用箇所の命名を明確にしましょう。

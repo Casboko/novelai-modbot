@@ -11,6 +11,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Dict, Iterable, List, Mapping
 
+import random
+
 import yaml
 from .analyzer_nudenet import NudeNetAnalyzer
 from .batch_loader import ImageRequest, load_images
@@ -66,6 +68,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rules-config", type=Path, default=Path("configs/rules.yaml"))
     parser.add_argument("--qps", type=float, default=5.0)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument(
+        "--nudenet-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "always", "never"],
+        help="NudeNet execution policy: auto (gate by WD14), always (run on cache-miss), never (skip on cache-miss)",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--batch-size", type=int, help="Overrides NudeNet batch size")
     return parser.parse_args()
@@ -256,17 +265,61 @@ async def async_main() -> None:
     missing: list[str] = []
     cached_payloads: dict[str, dict] = {}
 
+    thresholds_cfg = rules_cfg.get("thresholds", {}) if isinstance(rules_cfg, dict) else {}
+    q_thr = float(thresholds_cfg.get("wd14_questionable", 0.35))
+    e_thr = float(thresholds_cfg.get("wd14_explicit", 0.20))
+
+    mode = args.nudenet_mode
+    is_always = mode == "always"
+    is_never = mode == "never"
+
+    nn_candidates = 0
+    nn_executed = 0
+    nn_skipped = 0
+    nn_cache_hits = 0
+    nn_lat_samples: list[float] = []
+    NN_LAT_SAMPLES = 2048
+
     for phash in phashes:
         key = NudeCacheKey(phash=phash, model="nudenet", version=analyzer.version)
         cached = cache.get(key)
         if cached is not None:
             cache_hits += 1
+            nn_cache_hits += 1
             cached_payloads[phash] = cached
-        else:
+            continue
+
+        if is_never:
+            nn_skipped += 1
+            cached_payloads[phash] = {}
+            continue
+
+        if is_always:
+            nn_candidates += 1
             missing.append(phash)
+            continue
+
+        wd_entry = wd14_entries.get(phash, {})
+        wd_payload = wd_entry.get("wd14", {}) if isinstance(wd_entry, dict) else {}
+        rating = wd_payload.get("rating", {}) if isinstance(wd_payload, dict) else {}
+        try:
+            q_score = float(rating.get("questionable", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            q_score = 0.0
+        try:
+            e_score = float(rating.get("explicit", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            e_score = 0.0
+
+        if (q_score >= q_thr) or (e_score >= e_thr):
+            nn_candidates += 1
+            missing.append(phash)
+        else:
+            nn_skipped += 1
+            cached_payloads[phash] = {}
 
     async def process_batch(batch_phashes: list[str]) -> None:
-        nonlocal total_latency_ms, processed
+        nonlocal total_latency_ms, processed, nn_executed, nn_lat_samples
         requests = [
             ImageRequest(
                 identifier=phash,
@@ -288,6 +341,18 @@ async def async_main() -> None:
         elapsed = (time.perf_counter() - start) * 1000
         total_latency_ms += elapsed
         processed += len(ok_results)
+        count = len(ok_results)
+        if count:
+            per_item_ms = elapsed / count
+            for idx in range(count):
+                seen = nn_executed + idx
+                if len(nn_lat_samples) < NN_LAT_SAMPLES:
+                    nn_lat_samples.append(per_item_ms)
+                else:
+                    j = random.randint(0, seen)
+                    if j < NN_LAT_SAMPLES:
+                        nn_lat_samples[j] = per_item_ms
+            nn_executed += count
         for res, dets in zip(ok_results, detections):
             payload = {
                 "detections": [
@@ -410,6 +475,13 @@ async def async_main() -> None:
     else:
         avg_latency = 0.0
 
+    def percentile95(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(values)
+        index = int(0.95 * (len(sorted_values) - 1))
+        return float(sorted_values[index])
+
     metrics = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_records": len(records),
@@ -417,6 +489,17 @@ async def async_main() -> None:
         "nudity_failures": failures,
         "nudenet_version": analyzer.version,
         "average_nudenet_latency_ms": round(avg_latency, 2),
+        "nudenet": {
+            "mode": mode,
+            "thr_questionable": q_thr,
+            "thr_explicit": e_thr,
+            "candidates": nn_candidates + nn_cache_hits,
+            "executed": nn_executed,
+            "skipped": nn_skipped,
+            "cache_hits": nn_cache_hits,
+            "avg_latency_ms": round(avg_latency, 2),
+            "p95_latency_ms": round(percentile95(nn_lat_samples), 2),
+        },
     }
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
     args.metrics.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")

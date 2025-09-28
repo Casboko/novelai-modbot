@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+import random
 from typing import Optional
 
 import aiohttp
@@ -33,9 +34,18 @@ class FetchResult:
 
 
 class ImageFetcher:
-    def __init__(self, session: aiohttp.ClientSession, limiter: RateLimiter) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        limiter: RateLimiter,
+        *,
+        max_retries: int = 4,
+        max_backoff: float = 60.0,
+    ) -> None:
         self._session = session
         self._limiter = limiter
+        self._max_retries = max(0, int(max_retries))
+        self._max_backoff = max_backoff
 
     async def fetch(self, url: str) -> FetchResult:
         head_ct, head_size, head_note = await self._head(url)
@@ -52,12 +62,15 @@ class ImageFetcher:
         return FetchResult(data, final_ct, get_size or head_size or len(data), None)
 
     async def _head(self, url: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
-        for _ in range(3):
+        last_note: Optional[str] = None
+        for attempt in range(self._max_retries + 1):
             await self._limiter.wait()
             try:
                 async with self._session.head(url, allow_redirects=True) as resp:
-                    if resp.status == 429:
-                        await asyncio.sleep(self._retry_after(resp))
+                    status = resp.status
+                    if status == 429 or 500 <= status < 600:
+                        last_note = f"head_status_{status}"
+                        await self._sleep_with_backoff(attempt, self._retry_after(resp))
                         continue
                     if resp.status in {405, 501}:
                         return None, None, "method_not_allowed"
@@ -68,16 +81,21 @@ class ImageFetcher:
                     size = int(length) if length and length.isdigit() else None
                     return content_type, size, None
             except aiohttp.ClientError as exc:
-                return None, None, f"head_error:{exc.__class__.__name__}"
-        return None, None, "head_error:retry_exceeded"
+                last_note = f"head_error:{exc.__class__.__name__}"
+                await self._sleep_with_backoff(attempt, None)
+                continue
+        return None, None, last_note or "head_error:retry_exceeded"
 
     async def _get(self, url: str) -> tuple[Optional[bytes], Optional[str], Optional[int], Optional[str]]:
-        for _ in range(3):
+        last_note: Optional[str] = None
+        for attempt in range(self._max_retries + 1):
             await self._limiter.wait()
             try:
                 async with self._session.get(url, allow_redirects=True) as resp:
-                    if resp.status == 429:
-                        await asyncio.sleep(self._retry_after(resp))
+                    status = resp.status
+                    if status == 429 or 500 <= status < 600:
+                        last_note = f"get_status_{status}"
+                        await self._sleep_with_backoff(attempt, self._retry_after(resp))
                         continue
                     if resp.status >= 400:
                         return None, None, None, f"get_status_{resp.status}"
@@ -86,16 +104,33 @@ class ImageFetcher:
                     size = len(content)
                     return content, content_type, size, None
             except aiohttp.ClientError as exc:
-                return None, None, None, f"get_error:{exc.__class__.__name__}"
-        return None, None, None, "get_error:retry_exceeded"
+                last_note = f"get_error:{exc.__class__.__name__}"
+                await self._sleep_with_backoff(attempt, None)
+                continue
+        return None, None, None, last_note or "get_error:retry_exceeded"
 
     @staticmethod
-    def _retry_after(resp: aiohttp.ClientResponse) -> float:
+    def _retry_after(resp: aiohttp.ClientResponse) -> Optional[float]:
         retry = resp.headers.get("Retry-After")
+        if retry is None:
+            return None
         try:
-            if retry is None:
-                return 1.0
             return float(retry)
         except ValueError:
-            return 1.0
+            return None
 
+    async def _sleep_with_backoff(self, attempt: int, retry_after: Optional[float]) -> None:
+        if attempt >= self._max_retries:
+            return
+        delay = self._compute_backoff(attempt, retry_after)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    def _compute_backoff(self, attempt: int, retry_after: Optional[float]) -> float:
+        if retry_after is not None:
+            delay = retry_after
+        else:
+            base = 1.0 * (2 ** attempt)
+            jitter = random.uniform(0, 0.5)
+            delay = base + jitter
+        return max(0.1, min(delay, self._max_backoff))
