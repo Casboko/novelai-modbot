@@ -459,8 +459,14 @@ async def handle_due_ticket(
         )
         return
 
+    delete_reason = build_audit_reason(ticket, "auto_delete")
     try:
-        await message.delete(reason=build_audit_reason(ticket, "auto_delete"))
+        await message.delete(reason=delete_reason)
+    except TypeError as exc:
+        # discord.PartialMessage.delete などは reason を受け付けないためフォールバックする
+        if "reason" not in str(exc):
+            raise
+        await message.delete()
     except discord.HTTPException as exc:
         await ticket_store.update_status(ticket.ticket_id, status="failed")
         await ticket_store.append_log(
