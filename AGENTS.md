@@ -63,6 +63,10 @@
 - `--extra-args "--nudenet-mode auto"` を指定すると、p2 での NudeNet 実行を WD14 スコアに基づいてゲートできます。`auto`（既定）は `rating.questionable ≥ 0.35` または `rating.explicit ≥ 0.20` のときのみ推論を実行し、`always` は全件実行、`never` はキャッシュヒット以外をスキップします。
 - メトリクスには従来の `average_nudenet_latency_ms` / `from_cache` に加えて、`nudenet.executed` / `nudenet.skipped` / `nudenet.p95_latency_ms` などの詳細指標が出力されます。ゲート調整時は `nudenet.executed` と `nudenet.skipped` を並行して確認してください。
 
+### Runpod バッチ運用
+- Runpod 上での大規模加工手順は `docs/runpod_batch_runbook.md` を参照してください。
+- Network Volume, S3 同期、レート制御、A/B 比較、レビュー用 CSV の出力までを一冊にまとめています。
+
 ## コーディングスタイルと命名規約
 Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹底してください。関数・変数は snake_case、クラスは PascalCase で統一し、型ヒントと `from __future__ import annotations` を前提に遅延評価を維持します。自動整形ツールは同梱されていないため、`ruff` や `black` をローカルで実行し差分がない状態でコミットしてください。非同期処理では `asyncio` ループのキャンセル管理が重要なので、タイムアウト値や `RateLimiter` 利用箇所の命名を明確にしましょう。
 

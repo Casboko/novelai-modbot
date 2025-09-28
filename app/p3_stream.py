@@ -42,6 +42,7 @@ class MetricsReport:
     total: int
     severity_counts: Counter
     winning_counts: Counter
+    winning_ratio: dict[str, float]
     top_rules: list[tuple[str, int]]
     latency_ms_avg: float
     latency_ms_p95: float
@@ -53,6 +54,7 @@ class MetricsReport:
             "total": self.total,
             "severity": dict(self.severity_counts),
             "winning": dict(self.winning_counts),
+            "winning_ratio": self.winning_ratio,
             "top_rules": self.top_rules,
             "latency_ms_avg": round(self.latency_ms_avg, 3),
             "latency_ms_p95": round(self.latency_ms_p95, 3),
@@ -90,10 +92,16 @@ class MetricsAggregator:
     def finalize(self, wall_time_s: float) -> MetricsReport:
         avg = (self.latency_sum / self.total) if self.total else 0.0
         p95 = self.latency_reservoir.percentile(95.0)
+        total_wins = max(1, self.winning.get("legacy", 0) + self.winning.get("dsl", 0))
+        winning_ratio = {
+            "legacy": round(self.winning.get("legacy", 0) / total_wins, 6),
+            "dsl": round(self.winning.get("dsl", 0) / total_wins, 6),
+        }
         return MetricsReport(
             total=self.total,
             severity_counts=Counter(self.severity),
             winning_counts=Counter(self.winning),
+            winning_ratio=winning_ratio,
             top_rules=self.rule_hits.most_common(20),
             latency_ms_avg=avg,
             latency_ms_p95=p95,
