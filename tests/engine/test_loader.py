@@ -47,6 +47,27 @@ def test_load_rule_config_v2_success(tmp_path: Path) -> None:
     assert raw["version"] == 2
 
 
+def test_load_rule_config_logs_group_collisions(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+        version: 2
+        groups:
+          nsfw_general: ["see through", "see_through"]
+        rules:
+          - id: SAMPLE
+            severity: red
+            priority: 1
+            when: "rating.explicit >= 0.5"
+        """,
+    )
+    caplog.set_level("DEBUG", logger="app.engine.dsl")
+    config, _, _ = load_rule_config(path)
+    assert config is not None
+    assert config.groups["nsfw_general"] == ["see_through"]
+    assert any("collisions" in message for message in caplog.messages)
+
+
 def test_load_rule_config_v2_invalid_rule_warn(tmp_path: Path) -> None:
     path = _write_yaml(
         tmp_path,

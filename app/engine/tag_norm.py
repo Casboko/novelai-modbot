@@ -3,11 +3,18 @@ from __future__ import annotations
 import fnmatch
 import re
 import unicodedata
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _UNDERSCORE_RE = re.compile(r"_+")
 _WILDCARD_CHARS = set("*?[")
+
+__all__ = [
+    "normalize_tag",
+    "normalize_pair",
+    "format_tag_for_display",
+    "expand_groups",
+]
 
 
 def normalize_tag(value: str) -> str:
@@ -30,6 +37,40 @@ def normalize_tag(value: str) -> str:
     text = text.replace("-", "_").replace(" ", "_")
     text = _UNDERSCORE_RE.sub("_", text)
     return text
+
+
+def normalize_pair(item: object) -> tuple[str, float] | None:
+    """Coerce an arbitrary item into a normalised ``(tag, score)`` pair."""
+
+    name: Any
+    score: Any
+    if isinstance(item, (list, tuple)) and len(item) == 2:
+        name, score = item
+    elif isinstance(item, Mapping):
+        name = item.get("name")
+        score = item.get("score")
+    else:
+        return None
+
+    canonical = normalize_tag(name) if name is not None else ""
+    if not canonical:
+        return None
+
+    try:
+        numeric = float(score)
+    except (TypeError, ValueError):
+        return None
+
+    return canonical, numeric
+
+
+def format_tag_for_display(value: str) -> str:
+    """Return a human-friendly representation of a normalised tag."""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    return text.replace("_", " ")
 
 
 def _has_wildcard(pattern: str) -> bool:

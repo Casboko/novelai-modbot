@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .engine.tag_norm import normalize_pair
+
 
 @dataclass(slots=True)
 class CacheKey:
@@ -55,7 +57,9 @@ class WD14Cache:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row[0])
+        payload = json.loads(row[0])
+        _normalize_payload(payload)
+        return payload
 
     def set(self, key: CacheKey, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -69,3 +73,26 @@ class WD14Cache:
                 (key.phash, key.model, key.revision, data),
             )
             conn.commit()
+
+
+def _merge_score_map(items: Any) -> list[tuple[str, float]]:
+    merged: dict[str, float] = {}
+    if not isinstance(items, list):
+        return []
+    for item in items:
+        pair = normalize_pair(item)
+        if pair is None:
+            continue
+        tag, score = pair
+        previous = merged.get(tag)
+        if previous is None or score > previous:
+            merged[tag] = score
+    return sorted(merged.items(), key=lambda entry: entry[1], reverse=True)
+
+
+def _normalize_payload(payload: dict[str, Any]) -> None:
+    for field in ("general_raw", "general"):
+        items = payload.get(field)
+        if not items:
+            continue
+        payload[field] = _merge_score_map(items)

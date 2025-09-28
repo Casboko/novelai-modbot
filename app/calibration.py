@@ -7,6 +7,8 @@ from typing import Dict, Iterable
 
 EPS = 1e-6
 
+from .engine.tag_norm import normalize_pair
+
 
 def _logit(p: float) -> float:
     value = min(max(p, EPS), 1.0 - EPS)
@@ -34,19 +36,6 @@ def load_calibration(path: Path) -> Dict:
         return {}
 
 
-def _coerce_pair(item: Iterable) -> tuple[str, float] | None:
-    if isinstance(item, (list, tuple)) and len(item) == 2:
-        name, score = item
-        return str(name), float(score)
-    if isinstance(item, dict):
-        name = item.get("name")
-        score = item.get("score")
-        if name is None or score is None:
-            return None
-        return str(name), float(score)
-    return None
-
-
 def apply_wd14_calibration(wd14: dict, calib: Dict) -> dict:
     if not calib:
         return wd14
@@ -67,7 +56,7 @@ def apply_wd14_calibration(wd14: dict, calib: Dict) -> dict:
             continue
         calibrated: list[tuple[str, float]] = []
         for item in items:
-            pair = _coerce_pair(item)
+            pair = normalize_pair(item)
             if pair is None:
                 continue
             name, score = pair

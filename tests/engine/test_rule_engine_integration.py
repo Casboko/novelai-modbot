@@ -3,6 +3,8 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from app.rule_engine import RuleEngine
 
 
@@ -55,3 +57,51 @@ def test_rule_engine_with_dsl_merges_result(tmp_path: Path) -> None:
     assert result.metrics["winning"]["origin"] == "dsl"
     assert result.metrics["dsl"]["rule_id"] == "DSL-RED"
     assert any(reason.startswith("exp=") for reason in result.reasons)
+
+
+def test_rule_engine_tag_collisions_recorded(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+        version: 2
+        dsl_mode: warn
+        models:
+          wd14_repo: repo/example
+        thresholds: {}
+        minor_tags: []
+        violence_tags: []
+        nsfw_general_tags: ["see_through"]
+        animal_abuse_tags: []
+        rule_titles:
+          DSL-RED: "DSL Red"
+        groups: {}
+        features: {}
+        rules:
+          - id: DSL-RED
+            severity: red
+            priority: 1
+            when: "rating.explicit >= 0.5"
+            reasons:
+              - "exp={rating.explicit:.2f}"
+        """,
+    )
+    engine = RuleEngine(config_path=str(config_path))
+    record = {
+        "wd14": {
+            "rating": {"explicit": 0.2, "questionable": 0.0, "general": 0.3, "sensitive": 0.5},
+            "general": [
+                ("see through", 0.25),
+                ("see_through", 0.4),
+            ],
+        },
+        "xsignals": {},
+        "nudity_detections": [],
+        "is_nsfw_channel": False,
+        "messages": [],
+    }
+
+    result = engine.evaluate(record)
+
+    collisions = result.metrics.get("tag_norm", {}).get("collisions")
+    assert collisions == 1
+    assert result.metrics["nsfw_general_sum"] == pytest.approx(0.4)

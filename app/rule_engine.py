@@ -6,18 +6,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .engine.dsl import DslEvaluationInput, DslEvaluationOutcome, DslProgram, SEVERITY_ORDER
 from .engine.loader import load_rule_config
-from .engine.tag_norm import normalize_tag as dsl_normalize_tag
+from .engine.tag_norm import normalize_pair, normalize_tag
 from .engine.types import DslPolicy, RuleConfigV2
 
 DEFAULT_SEVERITY = "green"
 DEFAULT_RULES_PATH = "configs/rules.yaml"
 DEFAULT_NUDENET_CONFIG_PATH = "configs/nudenet.yaml"
-KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
-
-# ---------------------------------------------------------------------------
-# 静的サブ集合（全て小文字、スペース区切り）。
-# WD14 の一般タグは `_normalize_tag` の後に lower() してマッチさせる。
-# ---------------------------------------------------------------------------
 SEX_MODIFIER_TAGS = {
     "cameltoe",
     "collar",
@@ -25,43 +19,43 @@ SEX_MODIFIER_TAGS = {
     "lactation",
     "nipples",
     "pregnant",
-    "pubic hair",
+    "pubic_hair",
     "slave",
     "spanking",
 }
 
 ANIMAL_ABUSE_CONTEXT_TAGS = {
-    "animal abuse",
-    "animal cruelty",
-    "animal harm",
-    "animal torture",
-    "animal blood",
-    "animal gore",
-    "animal corpse",
-    "animal trap",
-    "animal fight",
-    "animal starvation",
-    "animal neglect",
-    "feral abuse",
+    "animal_abuse",
+    "animal_cruelty",
+    "animal_harm",
+    "animal_torture",
+    "animal_blood",
+    "animal_gore",
+    "animal_corpse",
+    "animal_trap",
+    "animal_fight",
+    "animal_starvation",
+    "animal_neglect",
+    "feral_abuse",
     "yiff",
     "bestiality",
     "zoophilia",
     "zoosadism",
-    "furry bestiality",
+    "furry_bestiality",
 }
 
 GORE_TAGS = {
     "blood",
-    "blood on face",
-    "blood on arm",
-    "blood stain",
+    "blood_on_face",
+    "blood_on_arm",
+    "blood_stain",
     "gore",
     "guts",
     "injury",
     "scar",
-    "scar on face",
-    "scar on arm",
-    "scar across eye",
+    "scar_on_face",
+    "scar_on_arm",
+    "scar_across_eye",
     "wound",
     "bruise",
     "corpse",
@@ -73,9 +67,9 @@ DISMEMBER_TAGS = {
     "dismember",
     "dismemberment",
     "decapitation",
-    "severed arm",
-    "severed leg",
-    "severed head",
+    "severed_arm",
+    "severed_leg",
+    "severed_head",
 }
 
 DRUG_KEYWORDS = (
@@ -200,7 +194,17 @@ class RuleEngine:
     def _build_legacy_config(data: Mapping[str, Any]) -> RuleConfig:
         def normalize_list(items: Any) -> List[str]:
             if isinstance(items, (list, tuple, set)):
-                return [_normalize_tag(item) for item in items if isinstance(item, str)]
+                uniques: list[str] = []
+                seen: set[str] = set()
+                for item in items:
+                    if not isinstance(item, str):
+                        continue
+                    canonical = normalize_tag(item)
+                    if not canonical or canonical in seen:
+                        continue
+                    seen.add(canonical)
+                    uniques.append(canonical)
+                return uniques
             return []
 
         models = data.get("models") if isinstance(data.get("models"), Mapping) else {}
@@ -252,16 +256,19 @@ class RuleEngine:
         wd14 = analysis.get("wd14") or {}
         rating = wd14.get("rating") or {}
         general_tags = wd14.get("general") or []
-        general_entries = list(self._iter_general_tags(general_tags))
-        general_map = {
-            _normalize_tag(tag).lower(): score for tag, score in general_entries
-        }
-        normalized_tag_scores = {}
-        for tag, score in general_entries:
-            normalized = dsl_normalize_tag(tag)
-            if not normalized:
-                continue
-            normalized_tag_scores[normalized] = float(score)
+        general_map: Dict[str, float] = {}
+        normalized_tag_scores: Dict[str, float] = {}
+        tag_collision_count = 0
+        for pair in self._iter_general_tags(general_tags):
+            tag, score = pair
+            existing = general_map.get(tag)
+            if existing is not None:
+                tag_collision_count += 1
+                if score > existing:
+                    general_map[tag] = score
+            else:
+                general_map[tag] = score
+            normalized_tag_scores[tag] = score
         xsignals = analysis.get("xsignals", {})
         nudity = analysis.get("nudity_detections", [])
         is_nsfw_channel = bool(analysis.get("is_nsfw_channel"))
@@ -373,6 +380,9 @@ class RuleEngine:
             "dismember_peak": dismember_peak,
             "drug_score": drug_score,
         }
+        if tag_collision_count:
+            metrics.setdefault("tag_norm", {})
+            metrics["tag_norm"]["collisions"] = tag_collision_count
 
         messages = analysis.get("messages", []) or []
         attachment_count = 0
@@ -583,13 +593,9 @@ class RuleEngine:
     @staticmethod
     def _iter_general_tags(general_tags: Iterable) -> Iterable[tuple[str, float]]:
         for item in general_tags:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                yield item[0], float(item[1])
-            elif isinstance(item, Mapping):
-                name = item.get("name")
-                score = item.get("score")
-                if name is not None and score is not None:
-                    yield name, float(score)
+            pair = normalize_pair(item)
+            if pair is not None:
+                yield pair
 
     @staticmethod
     def _max_exposed_detection(nudity: Iterable[Mapping[str, Any]]) -> float:
@@ -652,10 +658,3 @@ class RuleEngine:
             reasons=reasons,
             metrics=metrics,
         )
-
-
-def _normalize_tag(name: str) -> str:
-    value = str(name)
-    if value in KEEP_UNDERSCORE:
-        return value
-    return value.replace("_", " ")

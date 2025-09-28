@@ -14,6 +14,8 @@ from typing import Dict, Iterable, List, Mapping
 import random
 
 import yaml
+
+from .engine.tag_norm import normalize_pair, normalize_tag
 from .analyzer_nudenet import NudeNetAnalyzer
 from .batch_loader import ImageRequest, load_images
 from .cache_nudenet import CacheKey as NudeCacheKey, NudeNetCache
@@ -45,16 +47,6 @@ WEAK_KEYWORDS = (
     "BUTTOCKS_COVERED",
     "BELLY_EXPOSED",
 )
-
-KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
-
-
-def _normalize_tag(name: str) -> str:
-    if name in KEEP_UNDERSCORE:
-        return name
-    return name.replace("_", " ")
-
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge WD14 and NudeNet analysis")
@@ -186,7 +178,13 @@ def compute_placement_risk(
     general_weight = float(cfg.get("general_weight", 0.3))
     exposure_weight = float(cfg.get("exposure_weight", 0.7))
     topk = int(cfg.get("topk", 3))
-    nsfw_tags = set(cfg.get("nsfw_tags", NSFW_GENERAL_TAGS_DEFAULT))
+    nsfw_tags: set[str] = set()
+    for item in cfg.get("nsfw_tags", NSFW_GENERAL_TAGS_DEFAULT):
+        if not isinstance(item, str):
+            continue
+        canonical = normalize_tag(item)
+        if canonical:
+            nsfw_tags.add(canonical)
 
     rating = wd14.get("rating", {})
     rating_component = max(float(rating.get("questionable", 0.0)), float(rating.get("explicit", 0.0))) * rating_weight
@@ -194,20 +192,12 @@ def compute_placement_risk(
     general_tags = wd14.get("general_raw") or wd14.get("general", [])
     scores: List[float] = []
     for item in general_tags:
-        tag: str | None
-        score: float | None
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            tag, score = item
-        elif isinstance(item, Mapping):
-            tag = item.get("name")
-            score = item.get("score")
-        else:
+        pair = normalize_pair(item)
+        if pair is None:
             continue
-        if tag is None or score is None:
-            continue
-        tag_norm = _normalize_tag(str(tag))
+        tag_norm, score = pair
         if tag_norm in nsfw_tags:
-            scores.append(float(score))
+            scores.append(score)
     general_component = 0.0
     if scores:
         general_component = mean(sorted(scores, reverse=True)[:topk]) * general_weight
@@ -242,13 +232,25 @@ async def async_main() -> None:
     cache = NudeNetCache(args.nudenet_cache)
 
     nsfw_tags_raw = rules_cfg.get("nsfw_general_tags", []) or []
-    nsfw_tags = {_normalize_tag(str(tag)) for tag in nsfw_tags_raw if isinstance(tag, str)}
+    nsfw_tags = set()
+    for tag in nsfw_tags_raw:
+        if not isinstance(tag, str):
+            continue
+        canonical = normalize_tag(tag)
+        if canonical:
+            nsfw_tags.add(canonical)
     placement_cfg = dict(placement_cfg)
     if nsfw_tags:
         placement_cfg["nsfw_tags"] = sorted(nsfw_tags)
     else:
         fallback_tags = placement_cfg.get("nsfw_tags", NSFW_GENERAL_TAGS_DEFAULT)
-        nsfw_tags = {_normalize_tag(str(tag)) for tag in fallback_tags}
+        nsfw_tags = set()
+        for tag in fallback_tags:
+            if not isinstance(tag, str):
+                continue
+            canonical = normalize_tag(tag)
+            if canonical:
+                nsfw_tags.add(canonical)
         placement_cfg["nsfw_tags"] = sorted(nsfw_tags)
 
     calib = load_calibration(Path("configs/calibration_wd14.json"))
@@ -395,17 +397,16 @@ async def async_main() -> None:
         placement_risk = compute_placement_risk(wd14_payload, exposure_score, placement_cfg)
 
         rating = wd14_payload.get("rating", {})
-        general_pairs = []
+        general_map: dict[str, float] = {}
         source_tags = wd14_payload.get("general_raw") or wd14_payload.get("general", []) or []
         for item in source_tags:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                general_pairs.append((str(item[0]), float(item[1])))
-            elif isinstance(item, Mapping):
-                name = item.get("name")
-                score = item.get("score")
-                if name is not None and score is not None:
-                    general_pairs.append((str(name), float(score)))
-        general_map = {name: score for name, score in general_pairs}
+            pair = normalize_pair(item)
+            if pair is None:
+                continue
+            tag, score = pair
+            existing = general_map.get(tag)
+            if existing is None or score > existing:
+                general_map[tag] = score
         general_rating = float(rating.get("general", 0.0))
         sensitive_rating = float(rating.get("sensitive", 0.0))
         questionable = float(rating.get("questionable", 0.0))

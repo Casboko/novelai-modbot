@@ -36,6 +36,8 @@ def load_rule_config(path: str | Path, policy: DslPolicy | None = None) -> tuple
 
     groups_cfg = _ensure_mapping(raw.get("groups"))
     groups: dict[str, list[str]] = {}
+    group_collision_examples: dict[str, set[str]] = {}
+    group_collision_count = 0
     for group_name, patterns in groups_cfg.items():
         canonical = normalize_tag(group_name)
         if not canonical:
@@ -47,6 +49,8 @@ def load_rule_config(path: str | Path, policy: DslPolicy | None = None) -> tuple
             resolved_policy.warn_once(f"DSL group '{group_name}' ignored because value is not a sequence", key=f"group:{group_name}:type")
             continue
         normalized_items: list[str] = []
+        seen_patterns: set[str] = set()
+        originals: dict[str, set[str]] = {}
         for pattern in patterns:
             if not isinstance(pattern, str):
                 resolved_policy.warn_once(
@@ -63,8 +67,40 @@ def load_rule_config(path: str | Path, policy: DslPolicy | None = None) -> tuple
                     key=f"group:{group_name}:empty",
                 )
                 continue
+            originals.setdefault(normalized, set()).add(pattern)
+            if normalized in seen_patterns:
+                group_collision_count += 1
+                if resolved_policy.strict:
+                    raise ValueError(
+                        f"group '{group_name}' contains duplicate pattern '{pattern}' after normalization"
+                    )
+                continue
+            seen_patterns.add(normalized)
             normalized_items.append(normalized)
+        for normalized, inputs in originals.items():
+            if len(inputs) > 1:
+                group_collision_examples.setdefault(normalized, set()).update(inputs)
+        if canonical in groups:
+            if resolved_policy.strict:
+                raise ValueError(f"group name '{group_name}' duplicates '{canonical}' after normalization")
+            resolved_policy.logger.debug(
+                "dsl loader: group '%s' overwrote existing canonical name '%s'",
+                group_name,
+                canonical,
+            )
         groups[canonical] = normalized_items
+
+    if group_collision_count:
+        samples: list[str] = []
+        for key, variants in sorted(group_collision_examples.items())[:5]:
+            sample_values = ", ".join(sorted(variants))
+            samples.append(f"{key} <= [{sample_values}]")
+        sample_text = "; ".join(samples)
+        resolved_policy.logger.debug(
+            "dsl loader: group pattern collisions=%d %s",
+            group_collision_count,
+            sample_text,
+        )
 
     features_cfg = _ensure_mapping(raw.get("features"))
     features: dict[str, str] = {}

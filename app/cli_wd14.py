@@ -22,6 +22,7 @@ from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
 from .batch_loader import ImageLoadResult, ImageRequest, load_images
 from .cache_wd14 import CacheKey, WD14Cache
 from .config import get_settings
+from .engine.tag_norm import normalize_tag
 from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
 
 
@@ -32,16 +33,8 @@ class Entry:
     rows: list[dict[str, str]]
 
 
-KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
 DEFAULT_CACHE_PATH = Path("app/cache_wd14.sqlite")
 LOG_LEVEL_CHOICES = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
-
-
-def normalize_tag_name(tag: str) -> str:
-    name = str(tag)
-    if name in KEEP_UNDERSCORE:
-        return name
-    return name.replace("_", " ")
 
 
 def load_rules_nsfw_tags(path: Path) -> set[str]:
@@ -56,7 +49,14 @@ def load_rules_nsfw_tags(path: Path) -> set[str]:
     tags = data.get("nsfw_general_tags", [])
     if not isinstance(tags, list):
         return set()
-    return {normalize_tag_name(tag) for tag in tags if isinstance(tag, str)}
+    result: set[str] = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        canonical = normalize_tag(tag)
+        if canonical:
+            result.add(canonical)
+    return result
 
 
 def parse_args() -> argparse.Namespace:

@@ -14,6 +14,8 @@ from timm.data import create_transform, resolve_data_config
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from app.engine.tag_norm import format_tag_for_display
+
 torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_REPO_MAP = {
     "vit": "SmilingWolf/wd-vit-tagger-v3",
@@ -104,7 +106,9 @@ def get_tags(
 
     # Convert to a string suitable for use as a training caption
     caption = ", ".join(combined_names)
-    taglist = caption.replace("_", " ").replace("(", "\(").replace(")", "\)")
+    display_names = [format_tag_for_display(name) for name in combined_names]
+    taglist = ", ".join(display_names)
+    taglist = taglist.replace("(", "\(").replace(")", "\)")
 
     return caption, taglist, rating_labels, char_labels, gen_labels
 

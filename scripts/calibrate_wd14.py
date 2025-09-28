@@ -10,27 +10,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from app.calibration import EPS, apply_temperature
-
-KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
-
-
-def normalize_tag(name: str) -> str:
-    value = str(name)
-    if value in KEEP_UNDERSCORE:
-        return value
-    return value.replace("_", " ")
-
-
-def coerce_pair(item: object) -> Tuple[str, float] | None:
-    if isinstance(item, (list, tuple)) and len(item) == 2:
-        return str(item[0]), float(item[1])
-    if isinstance(item, dict):
-        name = item.get("name")
-        score = item.get("score")
-        if name is None or score is None:
-            return None
-        return str(name), float(score)
-    return None
+from app.engine.tag_norm import normalize_pair, normalize_tag
 
 
 def load_wd14_predictions(path: Path) -> Dict[str, Dict[str, float]]:
@@ -47,11 +27,13 @@ def load_wd14_predictions(path: Path) -> Dict[str, Dict[str, float]]:
             general_tags = wd14.get("general_raw") or wd14.get("general") or []
             tag_scores: Dict[str, float] = {}
             for item in general_tags:
-                pair = coerce_pair(item)
+                pair = normalize_pair(item)
                 if pair is None:
                     continue
                 name, score = pair
-                tag_scores[normalize_tag(name)] = float(score)
+                current = tag_scores.get(name)
+                if current is None or score > current:
+                    tag_scores[name] = score
             predictions[str(phash)] = tag_scores
     return predictions
 
@@ -71,7 +53,9 @@ def load_labels(path: Path) -> List[Tuple[str, str, float]]:
             except ValueError:
                 continue
             gt = 1.0 if gt >= 0.5 else 0.0
-            records.append((phash, normalize_tag(tag), gt))
+            canonical = normalize_tag(tag)
+            if canonical:
+                records.append((phash, canonical, gt))
     return records
 
 

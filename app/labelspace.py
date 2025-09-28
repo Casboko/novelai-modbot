@@ -9,11 +9,11 @@ import pandas as pd
 from huggingface_hub import hf_hub_download
 from shutil import copy2
 
+from .engine.tag_norm import normalize_tag
 
 REPO_ID = "SmilingWolf/wd-eva02-large-tagger-v3"
 MODEL_FILENAME = "model.onnx"
 LABEL_FILENAME = "selected_tags.csv"
-KEEP_UNDERSCORE = {"0_0", "(o)_(o)"}
 
 
 @dataclass(slots=True)
@@ -67,10 +67,8 @@ def load_labelspace(csv_path: Path | str) -> LabelSpace:
 def _normalize_names(names: Iterable[str]) -> list[str]:
     normalized: list[str] = []
     for name in names:
-        if name in KEEP_UNDERSCORE:
-            normalized.append(name)
-        else:
-            normalized.append(name.replace("_", " "))
+        canonical = normalize_tag(name)
+        normalized.append(canonical)
     return normalized
 
 
