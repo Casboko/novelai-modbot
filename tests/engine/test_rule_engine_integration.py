@@ -19,14 +19,6 @@ def test_rule_engine_with_dsl_merges_result(tmp_path: Path) -> None:
         tmp_path,
         """
         version: 2
-        dsl_mode: warn
-        models:
-          wd14_repo: repo/example
-        thresholds: {}
-        minor_tags: []
-        violence_tags: []
-        nsfw_general_tags: []
-        animal_abuse_tags: []
         rule_titles:
           DSL-RED: "DSL Red"
         groups: {}
@@ -64,18 +56,12 @@ def test_rule_engine_tag_collisions_recorded(tmp_path: Path) -> None:
         tmp_path,
         """
         version: 2
-        dsl_mode: warn
-        models:
-          wd14_repo: repo/example
-        thresholds: {}
-        minor_tags: []
-        violence_tags: []
-        nsfw_general_tags: ["see_through"]
-        animal_abuse_tags: []
         rule_titles:
           DSL-RED: "DSL Red"
-        groups: {}
+        groups:
+          nsfw_general: ["see_through"]
         features: {}
+        nsfw_general_tags: ["see_through"]
         rules:
           - id: DSL-RED
             severity: red

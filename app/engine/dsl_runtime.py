@@ -8,6 +8,32 @@ from .tag_norm import normalize_tag
 
 _WILDCARD_CHARS = set("*?[")
 
+_BUILTIN_FUNCTIONS = {"score", "sum", "max", "min", "any", "count", "clamp"}
+_BASE_IDENTIFIERS = {
+    "rating",
+    "channel",
+    "message",
+    "attachment_count",
+    "nude",
+    "exposure_score",
+    "placement_risk_pre",
+    "exposure_peak",
+    "minors_peak",
+    "gore_peak",
+    "nsfw_margin",
+    "nsfw_ratio",
+    "nsfw_general_sum",
+    "violence_sum",
+    "violence_max",
+    "animals_peak",
+    "animal_context_peak",
+    "sexual_explicit_sum",
+    "sexual_modifier_sum",
+    "dismember_peak",
+    "gore_sum",
+    "drug_score",
+}
+
 
 def clamp(value: float, lo: float, hi: float) -> float:
     lo = float(lo)
@@ -189,3 +215,15 @@ def build_context(
     namespace["count"] = count_func
 
     return RuntimeContext(namespace=namespace, resolver=resolver)
+
+
+def list_builtin_identifiers() -> set[str]:
+    """Return identifiers that the runtime injects into DSL namespaces."""
+
+    return set(_BASE_IDENTIFIERS)
+
+
+def list_builtin_functions() -> set[str]:
+    """Return callable names that are always available in DSL expressions."""
+
+    return set(_BUILTIN_FUNCTIONS)

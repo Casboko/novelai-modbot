@@ -1,3 +1,58 @@
+version: 2
+dsl_mode: warn
+
+rule_titles:
+  RED-201: "暴力・グロが疑われる"
+  RED-301: "未成年の性的描写が疑われる"
+  ORANGE-101: "18+でないチャンネルの成人向けコンテンツ"
+  YELLOW-101: "軽度の露出"
+  YELLOW-201: "若年寄りの特徴を含む"
+  RED-NSFW-101: "非NSFWチャンネルの性的表現"
+  RED-MINOR-SEX-201: "未成年×性的"
+  RED-MINOR-GORE-202: "未成年×流血/損壊"
+  RED-ANIMAL-SEX-301: "動物×性的/獣姦"
+  RED-ANIMAL-GORE-302: "動物×虐待/流血"
+  RED-DISMEMBER-BLOOD-401: "欠損×出血"
+  ORANGE-ADULT-SEX-DRUG-501: "成人×性的×薬物"
+  ORANGE-MINOR-MILD-601: "未成年×軽微露出"
+
+groups:
+  nsfw_general:
+    - bikini
+    - lingerie
+    - see_through
+    - underboob
+  animal_contexts:
+    - animal_abuse
+    - animal_harm
+    - animal_gore
+    - animal_cruelty
+  animal_subjects:
+    - dog
+    - cat
+    - horse
+    - bird
+
+features:
+  nsfw_margin: "max(rating.explicit, rating.questionable) - max(rating.general, rating.sensitive)"
+  animal_combo: "max('animal_contexts') * max('animal_subjects')"
+
+rules:
+  - id: ORANGE-101
+    severity: orange
+    priority: 10
+    when: "(!channel.is_nsfw) && (nsfw_margin >= 0.10 || any('nsfw_general', gt=0.35))"
+    reasons:
+      - "margin={nsfw_margin:.2f}"
+  - id: RED-ANIMAL-GORE-302
+    severity: red
+    priority: 20
+    when: "max('animal_contexts') >= 0.25 || (animal_combo >= 0.04)"
+    reasons:
+      - "ctx={max('animal_contexts'):.2f}"
+      - "combo={animal_combo:.2f}"
+    stop: true
+
 models:
   wd14_repo: "SmilingWolf/wd-eva02-large-tagger-v3"
 
@@ -213,18 +268,3 @@ severity_priority:
   red: 3
   orange: 2
   yellow: 1
-
-rule_titles:
-  RED-201: "暴力・グロが疑われる"
-  RED-301: "未成年の性的描写が疑われる"
-  ORANGE-101: "18+でないチャンネルの成人向けコンテンツ"
-  YELLOW-101: "軽度の露出"
-  YELLOW-201: "若年寄りの特徴を含む"
-  RED-NSFW-101: "非NSFWチャンネルの性的表現"
-  RED-MINOR-SEX-201: "未成年×性的"
-  RED-MINOR-GORE-202: "未成年×流血/損壊"
-  RED-ANIMAL-SEX-301: "動物×性的/獣姦"
-  RED-ANIMAL-GORE-302: "動物×虐待/流血"
-  RED-DISMEMBER-BLOOD-401: "欠損×出血"
-  ORANGE-ADULT-SEX-DRUG-501: "成人×性的×薬物"
-  ORANGE-MINOR-MILD-601: "未成年×軽微露出"

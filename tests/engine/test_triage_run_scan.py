@@ -13,13 +13,20 @@ def _write_analysis(path: Path, records: list[dict]) -> None:
 def _write_rules(path: Path) -> None:
     path.write_text(
         """
-models: {}
-thresholds: {}
-minor_tags: []
-violence_tags: []
-nsfw_general_tags: []
-animal_abuse_tags: []
-rule_titles: {}
+version: 2
+rule_titles:
+  TEST: "Test"
+
+groups:
+  sample: ["tag_a"]
+
+features:
+  sample_score: "score('tag_a')"
+
+rules:
+  - id: TEST
+    severity: green
+    when: "sample_score < 1"
         """.strip()
         + "\n",
         encoding="utf-8",

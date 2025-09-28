@@ -3,10 +3,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
-
-from app.engine import DslValidationError, RuleConfigV2
-from app.engine.loader import load_rule_config
+from app.engine.loader import load_rules_result
 
 
 def _write_yaml(tmp_path: Path, content: str) -> Path:
@@ -15,103 +12,197 @@ def _write_yaml(tmp_path: Path, content: str) -> Path:
     return path
 
 
-def test_load_rule_config_v2_success(tmp_path: Path) -> None:
+def _base_rules_yaml(extra: str = "") -> str:
+    return textwrap.dedent(
+        f"""
+        version: 2
+        rule_titles:
+          TEST-RED: "Test rule"
+
+        groups:
+          sample: ["See Through", "see_through"]
+
+        features:
+          boost: "max('sample')"
+
+        rules:
+          - id: TEST-RED
+            severity: red
+            when: "boost >= 0.5"
+            reasons:
+              - "boost={{boost:.2f}}"
+        {extra}
+        """
+    ).strip()
+
+
+def test_version_mismatch_warn_invalid(tmp_path: Path) -> None:
     path = _write_yaml(
         tmp_path,
+        _base_rules_yaml().replace("version: 2", "version: 1"),
+    )
+    result = load_rules_result(path)
+    assert result.status == "invalid"
+    assert result.counts["errors"] == 1
+
+
+def test_version_mismatch_strict_error(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        _base_rules_yaml().replace("version: 2", "version: 1"),
+    )
+    result = load_rules_result(path, override_mode="strict")
+    assert result.status == "error"
+
+
+def test_cli_override_mode_priority(tmp_path: Path) -> None:
+    yaml_text = _base_rules_yaml("dsl_mode: strict")
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path, override_mode="warn")
+    assert result.mode == "warn"
+
+
+def test_unknown_keys_warn(tmp_path: Path) -> None:
+    yaml_text = _base_rules_yaml(
+        """
+        thresholds:
+          sample: 0.5
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "ok"
+    assert result.counts["warnings"] >= 1
+    assert result.counts["unknown_keys"] == 1
+
+
+def test_unknown_keys_strict_error(tmp_path: Path) -> None:
+    yaml_text = _base_rules_yaml(
+        """
+        thresholds:
+          sample: 0.5
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path, override_mode="strict")
+    assert result.status == "error"
+
+
+def test_rule_titles_must_cover_rules(tmp_path: Path) -> None:
+    yaml_text = textwrap.dedent(
         """
         version: 2
-        dsl_mode: warn
-        models:
-          wd14_repo: repo/example
-        thresholds:
-          wd14_questionable: 0.3
+        rule_titles: {}
         groups:
-          nsfw_general: ["Bikini", "see through"]
-        features:
-          combo: "rating.explicit * exposure_peak"
+          sample: ["foo"]
+        features: {}
         rules:
-          - id: RED-1
+          - id: TEST-RED
             severity: red
-            priority: 5
+            when: "rating.explicit >= 0.5"
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "invalid"
+    assert any(issue.code == "R2-T001" for issue in result.issues)
+
+
+def test_duplicate_rule_ids_raise_invalid(tmp_path: Path) -> None:
+    yaml_text = textwrap.dedent(
+        """
+        version: 2
+        rule_titles:
+          DUP: "Duplicate"
+        groups: {}
+        features: {}
+        rules:
+          - id: DUP
+            severity: red
+            when: "rating.explicit >= 0.5"
+          - id: DUP
+            severity: orange
+            when: "rating.explicit >= 0.2"
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "invalid"
+    assert result.counts["disabled_rules"] == 1
+
+
+def test_group_patterns_are_normalized(tmp_path: Path) -> None:
+    yaml_text = textwrap.dedent(
+        """
+        version: 2
+        rule_titles:
+          TEST: "Test"
+        groups:
+          sample: ["See Through", "see_through"]
+        features: {}
+        rules:
+          - id: TEST
+            severity: red
+            when: "rating.explicit >= 0.5"
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.config is not None
+    assert result.config.config.groups["sample"] == ["see_through"]
+    assert result.counts["collisions"] == 1
+
+
+def test_unknown_identifier_disables_feature(tmp_path: Path) -> None:
+    yaml_text = textwrap.dedent(
+        """
+        version: 2
+        rule_titles:
+          TEST: "Test"
+        groups: {}
+        features:
+          broken: "missing_value + 1"
+        rules:
+          - id: TEST
+            severity: red
+            when: "rating.explicit >= 0.5"
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "invalid"
+    assert result.counts["disabled_features"] == 1
+    assert any(issue.code == "R2-E002" for issue in result.issues)
+
+
+def test_reason_placeholder_is_validated(tmp_path: Path) -> None:
+    yaml_text = textwrap.dedent(
+        """
+        version: 2
+        rule_titles:
+          TEST: "Test"
+        groups: {}
+        features: {}
+        rules:
+          - id: TEST
+            severity: red
             when: "rating.explicit >= 0.5"
             reasons:
-              - "exp={rating.explicit:.2f}"
-        """,
-    )
-    dsl_config, raw, policy = load_rule_config(path)
-    assert isinstance(dsl_config, RuleConfigV2)
-    assert policy.mode == "warn"
-    assert dsl_config.groups["nsfw_general"] == ["bikini", "see_through"]
-    assert "combo" in dsl_config.features
-    assert len(dsl_config.rules) == 1
-    assert raw["version"] == 2
-
-
-def test_load_rule_config_logs_group_collisions(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    path = _write_yaml(
-        tmp_path,
+              - "missing={missing_value:.2f}"
         """
-        version: 2
-        groups:
-          nsfw_general: ["see through", "see_through"]
-        rules:
-          - id: SAMPLE
-            severity: red
-            priority: 1
-            when: "rating.explicit >= 0.5"
-        """,
     )
-    caplog.set_level("DEBUG", logger="app.engine.dsl")
-    config, _, _ = load_rule_config(path)
-    assert config is not None
-    assert config.groups["nsfw_general"] == ["see_through"]
-    assert any("collisions" in message for message in caplog.messages)
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "invalid"
+    assert result.counts["placeholder_fixes"] == 1
+    assert any(issue.code == "R2-P001" for issue in result.issues)
 
 
-def test_load_rule_config_v2_invalid_rule_warn(tmp_path: Path) -> None:
-    path = _write_yaml(
-        tmp_path,
-        """
-        version: 2
-        rules:
-          - id: INVALID
-            severity: purple
-            when: "rating.explicit > 0.2"
-        """,
-    )
-    with pytest.raises(ValueError):
-        load_rule_config(path)
-
-
-def test_load_rule_config_v2_strict_raises(tmp_path: Path) -> None:
-    path = _write_yaml(
-        tmp_path,
-        """
-        version: 2
-        dsl_mode: strict
-        rules:
-          - id: STRICT
-            severity: red
-            when: "rating.explicit >> 0.5"
-        """,
-    )
-    with pytest.raises(DslValidationError):
-        load_rule_config(path)
-
-
-def test_load_rule_config_v1_passthrough(tmp_path: Path) -> None:
-    path = _write_yaml(
-        tmp_path,
-        """
-        models:
-          wd14_repo: repo
-        thresholds: {}
-        minor_tags: []
-        rules:
-          - sample: value
-        """,
-    )
-    dsl_config, raw, policy = load_rule_config(path)
-    assert dsl_config is None
-    assert raw["models"]["wd14_repo"] == "repo"
-    assert policy.mode == "warn"
+def test_rule_defaults_priority_and_stop(tmp_path: Path) -> None:
+    path = _write_yaml(tmp_path, _base_rules_yaml())
+    result = load_rules_result(path)
+    assert result.status == "ok"
+    assert result.config is not None
+    rule = result.config.config.rules[0]
+    assert rule.priority == 0
+    assert rule.stop is False

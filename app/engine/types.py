@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 Severity = Literal["red", "orange", "yellow", "green"]
 DslMode = Literal["strict", "warn"]
@@ -13,8 +13,9 @@ class DslRule:
     id: str
     severity: Severity
     when: str
-    priority: int = 100
+    priority: int = 0
     reasons: list[str] = field(default_factory=list)
+    stop: bool = False
 
 
 @dataclass(slots=True)
@@ -23,6 +24,32 @@ class RuleConfigV2:
     groups: dict[str, list[str]] = field(default_factory=dict)
     features: dict[str, str] = field(default_factory=dict)
     rules: list[DslRule] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class LoadedConfig:
+    rule_titles: dict[str, str]
+    config: RuleConfigV2
+    raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ValidationIssue:
+    level: Literal["error", "warning"]
+    code: str
+    where: str
+    msg: str
+    hint: str | None = None
+
+
+@dataclass(slots=True)
+class LoadResult:
+    status: Literal["ok", "invalid", "error"]
+    mode: DslMode
+    config: LoadedConfig | None
+    issues: list[ValidationIssue]
+    counts: dict[str, int]
+    summary: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

@@ -40,13 +40,22 @@ def _write_analysis(path: Path) -> None:
 def _write_rules(path: Path) -> None:
     content = textwrap.dedent(
         """
-        models: {}
-        thresholds: {}
-        minor_tags: []
-        violence_tags: []
-        nsfw_general_tags: []
-        animal_abuse_tags: []
-        rule_titles: {}
+        version: 2
+        rule_titles:
+          TEST: "Test"
+
+        groups:
+          sample: ["tag_a"]
+
+        features:
+          sample_score: "score('tag_a')"
+
+        rules:
+          - id: TEST
+            severity: yellow
+            when: "sample_score >= 0.5"
+            reasons:
+              - "score={sample_score:.2f}"
         """
     ).strip()
     path.write_text(content + "\n", encoding="utf-8")
