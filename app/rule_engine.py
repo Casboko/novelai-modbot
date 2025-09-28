@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
-import yaml
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .engine.dsl import DslEvaluationInput, DslEvaluationOutcome, DslProgram, SEVERITY_ORDER
+from .engine.loader import load_rule_config
 from .engine.tag_norm import normalize_tag as dsl_normalize_tag
+from .engine.types import DslPolicy
 
 DEFAULT_SEVERITY = "green"
 DEFAULT_RULES_PATH = "configs/rules.yaml"
@@ -118,11 +118,6 @@ class RuleConfig:
     animal_tags: List[str]
     xsignal_weights: Dict[str, float]
     rule_titles: Dict[str, str]
-    version: int = 1
-    dsl_groups: Dict[str, List[str]] = field(default_factory=dict)
-    dsl_features: Dict[str, str] = field(default_factory=dict)
-    dsl_rules: List[Dict[str, Any]] = field(default_factory=list)
-    dsl_mode: str = "warn"
 
 
 @dataclass(slots=True)
@@ -133,7 +128,7 @@ class PreparedContext:
     is_nsfw_channel: bool
     is_spoiler: bool
     attachment_count: int
-    metrics: Dict[str, float]
+    metrics: Dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -153,7 +148,10 @@ class RuleEngine:
         nudenet_config_path: str | None = None,
     ) -> None:
         rules_path = config_path or DEFAULT_RULES_PATH
-        self.config = self._load_config(rules_path)
+        dsl_config, raw_config, policy = load_rule_config(rules_path)
+        self._policy: DslPolicy = policy
+        self.raw_config = raw_config
+        self.config = self._build_legacy_config(raw_config)
         self._minor_tags = [tag.lower() for tag in self.config.minor_tags]
         self._violence_tags = [tag.lower() for tag in self.config.violence_tags]
         self._nsfw_tags = [tag.lower() for tag in self.config.nsfw_tags]
@@ -174,47 +172,33 @@ class RuleEngine:
             nudenet_config_path or DEFAULT_NUDENET_CONFIG_PATH
         )
         self._dsl_program: DslProgram | None = None
-        if self.config.version >= 2 and self.config.dsl_rules:
-            mode = (self.config.dsl_mode or "warn").strip().lower()
-            strict = mode == "strict"
-            self._dsl_program = DslProgram.from_config(
-                groups=self.config.dsl_groups,
-                features=self.config.dsl_features,
-                rules=self.config.dsl_rules,
-                strict=strict,
-            )
+        if dsl_config is not None:
+            self._dsl_program = DslProgram.from_config(dsl_config, policy)
 
     # ------------------------------------------------------------------
     # 設定ロード
     # ------------------------------------------------------------------
     @staticmethod
-    def _load_config(path: str) -> RuleConfig:
-        with open(path, "r", encoding="utf-8") as fp:
-            data = yaml.safe_load(fp)
+    def _build_legacy_config(data: Mapping[str, Any]) -> RuleConfig:
+        def normalize_list(items: Any) -> List[str]:
+            if isinstance(items, (list, tuple, set)):
+                return [_normalize_tag(item) for item in items if isinstance(item, str)]
+            return []
 
-        def normalize_list(items: Iterable[str]) -> List[str]:
-            return [_normalize_tag(item) for item in items if isinstance(item, str)]
-
-        version = int(data.get("version", 1))
-        groups = data.get("groups") if version >= 2 else {}
-        features = data.get("features") if version >= 2 else {}
-        rules = data.get("rules") if version >= 2 else []
-        dsl_mode = str(data.get("dsl_mode", "warn")) if version >= 2 else "warn"
+        models = data.get("models") if isinstance(data.get("models"), Mapping) else {}
+        thresholds = data.get("thresholds") if isinstance(data.get("thresholds"), Mapping) else {}
+        xsignals_weights = data.get("xsignals_weights") if isinstance(data.get("xsignals_weights"), Mapping) else {}
+        rule_titles = data.get("rule_titles") if isinstance(data.get("rule_titles"), Mapping) else {}
 
         return RuleConfig(
-            wd14_repo=data.get("models", {}).get("wd14_repo", ""),
-            thresholds=data.get("thresholds", {}),
-            minor_tags=normalize_list(data.get("minor_tags", [])),
-            violence_tags=normalize_list(data.get("violence_tags", [])),
-            nsfw_tags=normalize_list(data.get("nsfw_general_tags", [])),
-            animal_tags=normalize_list(data.get("animal_abuse_tags", [])),
-            xsignal_weights=data.get("xsignals_weights", {}),
-            rule_titles=data.get("rule_titles", {}),
-            version=version,
-            dsl_groups={str(k): list(v or []) for k, v in (groups or {}).items()} if isinstance(groups, Mapping) else {},
-            dsl_features={str(k): str(v) for k, v in (features or {}).items()} if isinstance(features, Mapping) else {},
-            dsl_rules=[dict(rule) for rule in (rules or []) if isinstance(rule, Mapping)] if isinstance(rules, Sequence) else [],
-            dsl_mode=dsl_mode,
+            wd14_repo=str(models.get("wd14_repo", "")) if isinstance(models, Mapping) else "",
+            thresholds=dict(thresholds),
+            minor_tags=normalize_list(data.get("minor_tags")),
+            violence_tags=normalize_list(data.get("violence_tags")),
+            nsfw_tags=normalize_list(data.get("nsfw_general_tags")),
+            animal_tags=normalize_list(data.get("animal_abuse_tags")),
+            xsignal_weights=dict(xsignals_weights),
+            rule_titles={str(k): str(v) for k, v in rule_titles.items()},
         )
 
     @staticmethod

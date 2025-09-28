@@ -2,35 +2,35 @@ from __future__ import annotations
 
 import pytest
 
-from app.engine.dsl import (
-    DslEvaluationInput,
-    DslProgram,
-    DslRuntimeError,
-    DslValidationError,
-    compile_expression,
-)
+from app.engine import DslProgram, DslRuntimeError, DslValidationError, DslPolicy
+from app.engine.dsl import DslEvaluationInput
+from app.engine.dsl_utils import validate_expr
+from app.engine.types import DslRule, RuleConfigV2
 
 
 def _build_program(strict: bool = False) -> DslProgram:
-    groups = {"nsfw_general": ["bikini", "see_through"]}
-    features = {"combo_score": "rating.explicit * exposure_peak"}
-    rules = [
-        {
-            "id": "TEST-RED",
-            "severity": "red",
-            "priority": 5,
-            "when": "(rating.explicit >= 0.4) || sum('nsfw_general') >= 0.30",
-            "reasons": ["exp={rating.explicit:.2f}", "sum={sum('nsfw_general'):.2f}"],
-        },
-        {
-            "id": "TEST-ORANGE",
-            "severity": "orange",
-            "priority": 10,
-            "when": "combo_score >= 0.10",
-            "reasons": ["combo={combo_score:.3f}"],
-        },
-    ]
-    return DslProgram.from_config(groups=groups, features=features, rules=rules, strict=strict)
+    config = RuleConfigV2(
+        groups={"nsfw_general": ["bikini", "see_through"]},
+        features={"combo_score": "rating.explicit * exposure_peak"},
+        rules=[
+            DslRule(
+                id="TEST-RED",
+                severity="red",
+                priority=5,
+                when="(rating.explicit >= 0.4) || sum('nsfw_general') >= 0.30",
+                reasons=["exp={rating.explicit:.2f}", "sum={sum('nsfw_general'):.2f}"],
+            ),
+            DslRule(
+                id="TEST-ORANGE",
+                severity="orange",
+                priority=10,
+                when="combo_score >= 0.10",
+                reasons=["combo={combo_score:.3f}"],
+            ),
+        ],
+    )
+    policy = DslPolicy.from_mode("strict" if strict else "warn")
+    return DslProgram.from_config(config, policy)
 
 
 def _default_input(program: DslProgram) -> DslEvaluationInput:
@@ -54,7 +54,8 @@ def test_dsl_program_matches_high_severity_rule() -> None:
     assert outcome.rule_id == "TEST-RED"
     # reasons are formatted with two decimals
     assert any(reason.startswith("exp=0.45") for reason in outcome.reasons)
-    assert "sum=0.32" in " ".join(outcome.reasons)
+    # グループには正規化された全タグが集計されるため、sum は bikini と see_through の合計になる
+    assert "sum=0.37" in " ".join(outcome.reasons)
     assert outcome.diagnostics["features"]["combo_score"] == pytest.approx(0.45 * 0.22)
 
 
@@ -62,8 +63,8 @@ def test_dsl_program_returns_lower_severity_when_high_rule_not_hit() -> None:
     program = _build_program()
     evaluation_input = _default_input(program)
     evaluation_input = evaluation_input.__class__(
-        rating={"explicit": 0.10, "questionable": 0.05, "general": 0.85},
-        metrics={"exposure_score": 0.45},
+        rating={"explicit": 0.30, "questionable": 0.05, "general": 0.60},
+        metrics={"exposure_score": 0.60},
         tag_scores={"bikini": 0.05},
         group_patterns=program.group_patterns,
         nude_flags=(),
@@ -99,23 +100,21 @@ def test_dsl_program_returns_none_when_no_rule_matches() -> None:
 )
 def test_compile_expression_rejects_unsupported_nodes(expression: str) -> None:
     with pytest.raises(DslValidationError):
-        compile_expression(expression)
+        validate_expr(expression)
 
 
 def test_reason_template_respects_strict_mode() -> None:
-    program = DslProgram.from_config(
-        groups={},
-        features={},
+    warn_config = RuleConfigV2(
         rules=[
-            {
-                "id": "STRICT-FAIL",
-                "severity": "red",
-                "when": "missing_value > 0",
-                "reasons": ["missing={missing_value}"],
-            }
-        ],
-        strict=False,
+            DslRule(
+                id="STRICT-FAIL",
+                severity="red",
+                when="missing_value > 0",
+                reasons=["missing={missing_value}"],
+            )
+        ]
     )
+    program = DslProgram.from_config(warn_config, DslPolicy.from_mode("warn"))
     outcome = program.evaluate(
         DslEvaluationInput(
             rating={},
@@ -130,19 +129,7 @@ def test_reason_template_respects_strict_mode() -> None:
     )
     assert outcome is None
 
-    strict_program = DslProgram.from_config(
-        groups={},
-        features={},
-        rules=[
-            {
-                "id": "STRICT-FAIL",
-                "severity": "red",
-                "when": "missing_value > 0",
-                "reasons": ["missing={missing_value}"],
-            }
-        ],
-        strict=True,
-    )
+    strict_program = DslProgram.from_config(warn_config, DslPolicy.from_mode("strict"))
     with pytest.raises(DslRuntimeError):
         strict_program.evaluate(
             DslEvaluationInput(

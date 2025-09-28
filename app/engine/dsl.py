@@ -2,129 +2,46 @@ from __future__ import annotations
 
 import ast
 import string
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from .dsl_errors import DslRuntimeError, DslValidationError
+from .dsl_errors import DslRuntimeError
 from .dsl_runtime import build_context
+from .dsl_utils import compile_expr
 from .tag_norm import normalize_tag
+from .types import DslPolicy, DslRule, RuleConfigV2
 
 SEVERITY_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
-ALLOWED_CALL_NAMES = {"score", "sum", "max", "min", "any", "count", "clamp"}
-ALLOWED_ATTR_CALLS = {("nude", "has"), ("nude", "any")}
-
-
-def _preprocess_expression(source: str) -> str:
-    if not isinstance(source, str):
-        raise DslValidationError("expression must be a string")
-    text = source.strip()
-    if not text:
-        return "0"
-    text = text.replace("&&", " and ").replace("||", " or ")
-    text = text.replace("!=", "__dsl_ne__")
-    text = text.replace("!", " not ")
-    text = text.replace("__dsl_ne__", "!=")
-    return text
-
-
-class _ExpressionValidator(ast.NodeVisitor):
-    _allowed_binops = (ast.Add, ast.Sub, ast.Mult, ast.Div)
-    _allowed_boolops = (ast.And, ast.Or)
-    _allowed_unary = (ast.Not, ast.USub, ast.UAdd)
-    _allowed_compops = (
-        ast.Eq,
-        ast.NotEq,
-        ast.Lt,
-        ast.LtE,
-        ast.Gt,
-        ast.GtE,
-    )
-
-    def visit_Expression(self, node: ast.Expression) -> None:  # noqa: D401
-        self.visit(node.body)
-
-    def visit_BoolOp(self, node: ast.BoolOp) -> None:
-        if not isinstance(node.op, self._allowed_boolops):
-            raise DslValidationError("unsupported boolean operator")
-        for value in node.values:
-            self.visit(value)
-
-    def visit_BinOp(self, node: ast.BinOp) -> None:
-        if not isinstance(node.op, self._allowed_binops):
-            raise DslValidationError("unsupported arithmetic operator")
-        self.visit(node.left)
-        self.visit(node.right)
-
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
-        if not isinstance(node.op, self._allowed_unary):
-            raise DslValidationError("unsupported unary operator")
-        self.visit(node.operand)
-
-    def visit_Compare(self, node: ast.Compare) -> None:
-        if not all(isinstance(op, self._allowed_compops) for op in node.ops):
-            raise DslValidationError("unsupported comparison operator")
-        self.visit(node.left)
-        for comparator in node.comparators:
-            self.visit(comparator)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        func = node.func
-        if isinstance(func, ast.Name):
-            if func.id not in ALLOWED_CALL_NAMES:
-                raise DslValidationError(f"function '{func.id}' is not allowed")
-        elif isinstance(func, ast.Attribute):
-            if isinstance(func.value, ast.Attribute):
-                raise DslValidationError("nested attribute call is not allowed")
-            if not isinstance(func.value, ast.Name):
-                raise DslValidationError("unsupported call expression")
-            pair = (func.value.id, func.attr)
-            if pair not in ALLOWED_ATTR_CALLS:
-                raise DslValidationError(f"method '{func.value.id}.{func.attr}' is not allowed")
-        else:
-            raise DslValidationError("unsupported call expression")
-        for arg in node.args:
-            self.visit(arg)
-        for keyword in node.keywords:
-            self.visit(keyword.value)
-
-    def visit_Attribute(self, node: ast.Attribute) -> None:
-        if isinstance(node.value, ast.Attribute):
-            raise DslValidationError("nested attribute access is not allowed")
-        if not isinstance(node.value, (ast.Name, ast.Subscript)):
-            raise DslValidationError("unsupported attribute base")
-        if isinstance(node.value, ast.Subscript):
-            raise DslValidationError("subscript access is not allowed")
-        self.visit(node.value)
-
-    def visit_Name(self, node: ast.Name) -> None:
-        if node.id.startswith("__"):
-            raise DslValidationError("identifier with double underscore is not allowed")
-
-    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: D401
-        if isinstance(node.value, complex):
-            raise DslValidationError("complex numbers are not supported")
-
-    def generic_visit(self, node: ast.AST) -> None:  # noqa: D401
-        raise DslValidationError(f"unsupported syntax: {type(node).__name__}")
-
-
-def compile_expression(source: str) -> ast.Expression:
-    processed = _preprocess_expression(source)
-    try:
-        node = ast.parse(processed, mode="eval")
-    except SyntaxError as exc:  # pragma: no cover - syntax errors should be rare
-        raise DslValidationError(f"invalid expression: {exc}") from exc
-    _ExpressionValidator().visit(node)
-    return node
 
 
 class SafeEvaluator(ast.NodeVisitor):
-    def __init__(self, namespace: Mapping[str, Any], *, strict: bool = False) -> None:
+    def __init__(self, namespace: Mapping[str, Any], policy: DslPolicy) -> None:
         self._namespace = namespace
-        self._strict = strict
+        self._policy = policy
+        self._context = "dsl"
+
+    @property
+    def strict(self) -> bool:
+        return self._policy.strict
+
+    @contextmanager
+    def context(self, value: str) -> Any:
+        previous = self._context
+        self._context = value
+        try:
+            yield
+        finally:
+            self._context = previous
+
+    def warn(self, message: str, *, key_suffix: str | None = None) -> None:
+        key = f"{self._context}:{key_suffix}" if key_suffix else self._context
+        self._policy.warn_once(message, key=key)
 
     def evaluate(self, node: ast.AST) -> Any:
         return self.visit(node)
+
+    # --- AST visitors -----------------------------------------------------
 
     def visit_Expression(self, node: ast.Expression) -> Any:  # noqa: D401
         return self.visit(node.body)
@@ -164,9 +81,10 @@ class SafeEvaluator(ast.NodeVisitor):
         if isinstance(node.op, ast.Div):
             try:
                 return float(left) / float(right)
-            except ZeroDivisionError:
-                if self._strict:
-                    raise
+            except ZeroDivisionError as exc:
+                if self.strict:
+                    raise DslRuntimeError("division by zero") from exc
+                self.warn("division by zero encountered", key_suffix="divzero")
                 return 0.0
         raise DslRuntimeError("unsupported arithmetic operation")
 
@@ -187,7 +105,7 @@ class SafeEvaluator(ast.NodeVisitor):
                 result = float(left) < float(right)
             elif isinstance(operator, ast.LtE):
                 result = float(left) <= float(right)
-            else:  # pragma: no cover - guarded by validator
+            else:  # pragma: no cover
                 raise DslRuntimeError("unsupported comparison operator")
             if not result:
                 return False
@@ -199,25 +117,29 @@ class SafeEvaluator(ast.NodeVisitor):
         args = [self.visit(arg) for arg in node.args]
         kwargs = {kw.arg: self.visit(kw.value) for kw in node.keywords}
         if not callable(func_obj):
-            if self._strict:
+            if self.strict:
                 raise DslRuntimeError("attempted to call a non-callable object")
+            self.warn("callable expected but object is not callable", key_suffix="noncallable")
             return 0.0
         try:
             return func_obj(*args, **kwargs)
-        except ZeroDivisionError:
-            if self._strict:
-                raise
+        except ZeroDivisionError as exc:
+            if self.strict:
+                raise DslRuntimeError("division by zero") from exc
+            self.warn("division by zero inside function call", key_suffix="call-divzero")
             return 0.0
         except Exception as exc:  # pragma: no cover - defensive fallback
-            if self._strict:
+            if self.strict:
                 raise DslRuntimeError(str(exc)) from exc
+            self.warn(f"function call failed: {exc}", key_suffix="call-error")
             return 0.0
 
     def visit_Name(self, node: ast.Name) -> Any:
         if node.id in self._namespace:
             return self._namespace[node.id]
-        if self._strict:
+        if self.strict:
             raise DslRuntimeError(f"unknown identifier: {node.id}")
+        self.warn(f"unknown identifier '{node.id}'", key_suffix=f"name:{node.id}")
         return 0.0
 
     def visit_Attribute(self, node: ast.Attribute) -> Any:
@@ -230,16 +152,13 @@ class SafeEvaluator(ast.NodeVisitor):
             if callable(value):
                 return value
             return value
-        if self._strict:
+        if self.strict:
             raise DslRuntimeError(f"attribute '{attr}' is not available")
+        self.warn(f"attribute '{attr}' not available", key_suffix=f"attr:{attr}")
         return 0.0
 
     def visit_Constant(self, node: ast.Constant) -> Any:  # noqa: D401
         return node.value
-
-    @property
-    def strict(self) -> bool:
-        return self._strict
 
 
 @dataclass(slots=True)
@@ -261,28 +180,31 @@ class ReasonTemplate:
     raw: str
     segments: tuple[ReasonSegment, ...]
 
-    def render(self, evaluator: SafeEvaluator, *, strict: bool) -> str:
+    def render(self, evaluator: SafeEvaluator, context: str) -> str:
         parts: list[str] = []
-        for segment in self.segments:
+        for index, segment in enumerate(self.segments):
             if segment.expression is None:
                 parts.append(segment.literal)
                 continue
-            try:
-                value = evaluator.evaluate(segment.expression)
-            except DslRuntimeError:
-                if strict:
-                    raise
-                value = ""
-            if segment.conversion == "s":
+            with evaluator.context(f"{context}:expr{index}"):
+                try:
+                    value = evaluator.evaluate(segment.expression)
+                except DslRuntimeError as exc:
+                    if evaluator.strict:
+                        raise
+                    evaluator.warn(f"reason expression failed: {exc}", key_suffix=f"expr{index}")
+                    value = ""
+            conversion = segment.conversion
+            if conversion == "s":
                 value = str(value)
-            elif segment.conversion == "r":
+            elif conversion == "r":
                 value = repr(value)
-            elif segment.conversion == "a":
+            elif conversion == "a":
                 value = ascii(value)
             if segment.format_spec:
                 try:
                     formatted = format(value, segment.format_spec)
-                except Exception:  # pragma: no cover
+                except Exception:  # pragma: no cover - formatting errors
                     formatted = str(value)
             else:
                 formatted = str(value)
@@ -292,12 +214,10 @@ class ReasonTemplate:
 
 @dataclass(slots=True)
 class CompiledRule:
-    rule_id: str
-    severity: str
-    priority: int
-    order: int
+    rule: DslRule
     condition: ast.Expression
     reasons: tuple[ReasonTemplate, ...]
+    order: int
 
 
 @dataclass(slots=True)
@@ -322,157 +242,152 @@ class DslEvaluationInput:
 
 
 class DslProgram:
-    def __init__(
-        self,
-        *,
-        features: Sequence[CompiledFeature],
-        rules: Sequence[CompiledRule],
-        group_patterns: Mapping[str, Sequence[str]],
-        strict: bool = False,
-    ) -> None:
+    def __init__(self, *, features: Sequence[CompiledFeature], rules: Sequence[CompiledRule], groups: Mapping[str, Sequence[str]], policy: DslPolicy) -> None:
         self._features = tuple(features)
         self._rules = tuple(rules)
-        self._group_patterns = {key: tuple(values) for key, values in group_patterns.items()}
-        self._strict = strict
+        self._groups = dict(groups)
+        self._policy = policy
 
     @classmethod
-    def from_config(
-        cls,
-        *,
-        groups: Mapping[str, Sequence[str]] | None,
-        features: Mapping[str, str] | None,
-        rules: Sequence[Mapping[str, Any]] | None,
-        strict: bool = False,
-    ) -> DslProgram:
-        group_patterns: dict[str, tuple[str, ...]] = {}
-        if groups:
-            for name, values in groups.items():
-                canonical = normalize_tag(name)
-                if not canonical:
-                    continue
-                normalized_values = tuple(
-                    normalize_tag(value)
-                    for value in values
-                    if isinstance(value, str) and value.strip()
-                )
-                group_patterns[canonical] = normalized_values
+    def from_config(cls, config: RuleConfigV2 | None, policy: DslPolicy) -> "DslProgram":
+        if config is None:
+            raise ValueError("config must not be None")
 
         compiled_features: list[CompiledFeature] = []
-        if features:
-            for name, expression in features.items():
-                feature_name = normalize_tag(name)
-                compiled_features.append(
-                    CompiledFeature(name=feature_name, expression=compile_expression(expression))
-                )
+        seen_features: set[str] = set()
+        for name, expression in config.features.items():
+            canonical = normalize_tag(name)
+            if not canonical:
+                policy.warn_once(f"DSL feature '{name}' ignored because name is empty after normalization", key=f"feature:{name}:name")
+                continue
+            if canonical in seen_features:
+                policy.warn_once(f"DSL feature '{name}' ignored because normalized name duplicates another feature", key=f"feature:{canonical}:dup")
+                continue
+            try:
+                compiled = compile_expr(expression)
+            except Exception as exc:
+                if policy.strict:
+                    raise
+                policy.warn_once(f"DSL feature '{name}' skipped due to compilation error: {exc}", key=f"feature:{name}:compile")
+                continue
+            compiled_features.append(CompiledFeature(name=canonical, expression=compiled))
+            seen_features.add(canonical)
 
         compiled_rules: list[CompiledRule] = []
-        if rules:
-            for index, rule in enumerate(rules):
-                rule_id = str(rule.get("id"))
-                severity = normalize_tag(rule.get("severity", ""))
-                if severity not in SEVERITY_ORDER:
-                    raise DslValidationError(f"unsupported severity '{severity}' in DSL rule {rule_id}")
-                priority = int(rule.get("priority", 100))
-                condition_expr = compile_expression(str(rule.get("when", "0")))
-                reasons_raw = rule.get("reasons", []) or []
-                reason_templates = tuple(_compile_reason(str(text)) for text in reasons_raw)
-                compiled_rules.append(
-                    CompiledRule(
-                        rule_id=rule_id or f"dsl-rule-{index}",
-                        severity=severity,
-                        priority=priority,
-                        order=index,
-                        condition=condition_expr,
-                        reasons=reason_templates,
-                    )
-                )
+        for order, rule in enumerate(config.rules):
+            try:
+                compiled_condition = compile_expr(rule.when)
+            except Exception as exc:
+                if policy.strict:
+                    raise
+                policy.warn_once(f"DSL rule '{rule.id}' skipped due to compilation error: {exc}", key=f"rule:{rule.id}:compile")
+                continue
+            reason_templates = tuple(
+                _compile_reason(template)
+                for template in rule.reasons
+            )
+            compiled_rules.append(CompiledRule(rule=rule, condition=compiled_condition, reasons=reason_templates, order=order))
 
-        return cls(
-            features=compiled_features,
-            rules=compiled_rules,
-            group_patterns=group_patterns,
-            strict=strict,
-        )
+        if not compiled_rules:
+            raise ValueError("no valid DSL rules were compiled")
+
+        return cls(features=compiled_features, rules=compiled_rules, groups=config.groups, policy=policy)
 
     def evaluate(self, inputs: DslEvaluationInput) -> DslEvaluationOutcome | None:
         runtime = build_context(
             rating=inputs.rating,
             metrics=inputs.metrics,
             tag_scores=inputs.tag_scores,
-            group_patterns=self._group_patterns,
+            group_patterns=self._groups,
             nude_flags=inputs.nude_flags,
             is_nsfw_channel=inputs.is_nsfw_channel,
             is_spoiler=inputs.is_spoiler,
             attachment_count=inputs.attachment_count,
         )
         namespace = runtime.namespace
-        evaluator = SafeEvaluator(namespace, strict=self._strict)
+        evaluator = SafeEvaluator(namespace, policy=self._policy)
 
         feature_values: dict[str, Any] = {}
         for feature in self._features:
-            try:
-                value = evaluator.evaluate(feature.expression)
-            except DslRuntimeError:
-                if self._strict:
-                    raise
-                value = 0.0
+            with evaluator.context(f"feature:{feature.name}"):
+                try:
+                    value = evaluator.evaluate(feature.expression)
+                except DslRuntimeError as exc:
+                    if evaluator.strict:
+                        raise
+                    evaluator.warn(f"feature evaluation failed: {exc}", key_suffix="eval")
+                    value = 0.0
             namespace[feature.name] = value
             feature_values[feature.name] = value
 
         hits: list[tuple[CompiledRule, list[str]]] = []
-        for rule in self._rules:
-            try:
-                matched = bool(evaluator.evaluate(rule.condition))
-            except DslRuntimeError:
-                if self._strict:
-                    raise
-                matched = False
+        for compiled_rule in self._rules:
+            rule = compiled_rule.rule
+            with evaluator.context(f"rule:{rule.id}:when"):
+                try:
+                    matched = bool(evaluator.evaluate(compiled_rule.condition))
+                except DslRuntimeError as exc:
+                    if evaluator.strict:
+                        raise
+                    evaluator.warn(f"rule condition evaluation failed: {exc}", key_suffix="condition")
+                    matched = False
             if not matched:
                 continue
             reasons: list[str] = []
-            for template in rule.reasons:
-                rendered = template.render(evaluator, strict=self._strict)
-                if rendered:
-                    reasons.append(rendered)
+            if compiled_rule.reasons:
+                for idx, template in enumerate(compiled_rule.reasons):
+                    context = f"rule:{rule.id}:reason:{idx}"
+                    with evaluator.context(context):
+                        try:
+                            rendered = template.render(evaluator, context)
+                        except DslRuntimeError as exc:
+                            if evaluator.strict:
+                                raise
+                            evaluator.warn(f"reason rendering failed: {exc}", key_suffix="render")
+                            rendered = ""
+                    if rendered:
+                        reasons.append(rendered)
             if not reasons:
-                reasons.append(rule.rule_id)
-            hits.append((rule, reasons))
+                reasons.append(rule.id)
+            hits.append((compiled_rule, reasons))
 
         if not hits:
             return None
 
         def sort_key(item: tuple[CompiledRule, list[str]]) -> tuple[int, int, int]:
-            rule, _ = item
+            compiled_rule, _ = item
+            rule = compiled_rule.rule
             severity_rank = SEVERITY_ORDER.get(rule.severity, -1)
-            return (-severity_rank, rule.priority, rule.order)
+            return (-severity_rank, rule.priority, compiled_rule.order)
 
         best_rule, best_reasons = sorted(hits, key=sort_key)[0]
+        rule = best_rule.rule
         diagnostics = {
             "origin": "dsl",
             "features": feature_values,
         }
         return DslEvaluationOutcome(
-            severity=best_rule.severity,
-            rule_id=best_rule.rule_id,
-            priority=best_rule.priority,
+            severity=rule.severity,
+            rule_id=rule.id,
+            priority=rule.priority,
             reasons=best_reasons,
             diagnostics=diagnostics,
         )
 
     @property
     def group_patterns(self) -> Mapping[str, Sequence[str]]:
-        return self._group_patterns
+        return self._groups
 
 
 def _compile_reason(template: str) -> ReasonTemplate:
-    formatter = string.Formatter()
     segments: list[ReasonSegment] = []
+    formatter = string.Formatter()
     for literal, field_name, format_spec, conversion in formatter.parse(template):
         if literal:
             segments.append(ReasonSegment(literal=literal, expression=None, format_spec=None, conversion=None))
         if field_name is None:
             continue
-        expression = compile_expression(field_name)
+        expression = compile_expr(field_name)
         segments.append(
             ReasonSegment(
                 literal="",
