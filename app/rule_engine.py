@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .engine.dsl import DslEvaluationInput, DslEvaluationOutcome, DslProgram, SEVERITY_ORDER
 from .engine.loader import load_rule_config
 from .engine.tag_norm import normalize_tag as dsl_normalize_tag
-from .engine.types import DslPolicy
+from .engine.types import DslPolicy, RuleConfigV2
 
 DEFAULT_SEVERITY = "green"
 DEFAULT_RULES_PATH = "configs/rules.yaml"
@@ -146,10 +146,13 @@ class RuleEngine:
         config_path: str | None = None,
         *,
         nudenet_config_path: str | None = None,
+        policy: DslPolicy | None = None,
     ) -> None:
         rules_path = config_path or DEFAULT_RULES_PATH
-        dsl_config, raw_config, policy = load_rule_config(rules_path)
-        self._policy: DslPolicy = policy
+        requested_policy = policy or DslPolicy()
+        dsl_config, raw_config, resolved_policy = load_rule_config(rules_path, requested_policy)
+        self.policy = resolved_policy
+        self.dsl_config: RuleConfigV2 | None = dsl_config
         self.raw_config = raw_config
         self.config = self._build_legacy_config(raw_config)
         self._minor_tags = [tag.lower() for tag in self.config.minor_tags]
@@ -172,8 +175,23 @@ class RuleEngine:
             nudenet_config_path or DEFAULT_NUDENET_CONFIG_PATH
         )
         self._dsl_program: DslProgram | None = None
-        if dsl_config is not None:
-            self._dsl_program = DslProgram.from_config(dsl_config, policy)
+        if self.dsl_config is not None:
+            self._dsl_program = DslProgram.from_config(self.dsl_config, self.policy)
+
+    def describe_config(self) -> str:
+        lines: list[str] = []
+        lines.append(f"policy.mode={self.policy.mode}")
+        if self.dsl_config is None:
+            lines.append("dsl=disabled (version=1)")
+        else:
+            groups = len(self.dsl_config.groups)
+            total_patterns = sum(len(items) for items in self.dsl_config.groups.values())
+            features = len(self.dsl_config.features)
+            rules = len(self.dsl_config.rules)
+            lines.append(
+                f"dsl=enabled groups={groups} patterns={total_patterns} features={features} rules={rules}"
+            )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 設定ロード

@@ -92,6 +92,49 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
 - 厳格モードが必要な場合は `dsl_mode: strict` を `rules.yaml` に追加すると未知変数やゼロ除算で即エラーになります（既定は `warn` モードで 0/False にフォールバック）。
 - DSL の単体テストは `tests/engine/test_dsl_program.py` を参考に追加してください。主要ケース（命中、非命中、安全性と禁止ノード）を網羅することが推奨です。
 
+## p3 スキャン（DSL対応）
+- 本番実行例:
+  ```bash
+  python -m app.cli_scan \\
+    --analysis out/p2/p2_analysis_all.jsonl \\
+    --findings out/p3/findings.jsonl \\
+    --rules configs/rules.yaml \\
+    --metrics out/metrics/p3_run.json \\
+    --dsl-mode warn
+  ```
+- ドライラン（結果を出さずメトリクスのみ確認）:
+  ```bash
+  python -m app.cli_scan \\
+    --analysis out/p2/p2_analysis_all.jsonl \\
+    --rules configs/rules.yaml \\
+    --metrics out/metrics/p3_dry.json \\
+    --dsl-mode warn --dry-run
+  ```
+- `--print-config` で DSL グループ/ルール数を要約表示できます。`--limit` / `--offset` を使うとサンプリング実行が可能です。
+
+## A/B 比較フロー
+1. 現行ルール（A）と候補ルール（B）を用意
+2. A/B を実行し、差分を確認
+   ```bash
+   python -m app.cli_rules_ab \\
+     --analysis out/p2/p2_analysis_all.jsonl \\
+     --rulesA configs/rules.yaml \\
+     --rulesB configs/rules_v2.yaml \\
+     --out-json out/metrics/p3_ab_compare.json \\
+     --out-csv  out/exports/p3_ab_diff.csv \\
+     --sample-diff 200 \\
+     --export-dir out/exports \\
+     --dsl-mode warn
+   ```
+3. `p3_ab_compare.json` で counts/delta/混同行列、`p3_ab_diff.csv` で差分列、`p3_ab_diff_samples.jsonl` でレビュー用サンプルを確認
+4. 差分レビュー後、合意したルールを `configs/rules.yaml` に昇格
+
+## strict / warn モード
+- `warn`（既定）: 未知識別子や式エラーは 0/False にフォールバックし WARN を 1ルール×エラー種あたり最大5回表示
+- `strict`: ローダ/評価器のいずれかで例外化し、問題ルールを即時洗い出し
+- CLI 引数 `--dsl-mode` が YAML の `dsl_mode` より優先されます
+- WARN が多い場合は strict で健全性を確認してから本番に適用してください
+
 ## コミットとプルリクエスト
 コミットメッセージは `feat(scope): summary` 形式の Conventional Commits が利用されています。変更内容と影響範囲を明確にするため `fix`, `chore`, `docs` なども適宜活用してください。プルリクエストには目的、主な変更点、検証ログ (`python -m app.cli_scan --help` など) を記載し、関連 issue やチケット番号をリンクします。レビューではキャッシュ破棄の有無や Discord API 制限への影響を説明し、Discord 出力や通知内容を変更した場合はスクリーンショット、サンプルログ、生成 CSV の抜粋を添付してください。
 

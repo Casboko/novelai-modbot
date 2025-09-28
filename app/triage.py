@@ -4,11 +4,15 @@ import csv
 import json
 import re
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
+from .engine.types import DslPolicy
+from .io.stream import iter_jsonl
+from .p3_stream import FindingsWriter, evaluate_stream
 from .rule_engine import RuleEngine
 
 
@@ -49,17 +53,21 @@ def run_scan(
     severity_filter: Optional[Sequence[str]] = None,
     time_range: Optional[tuple[datetime, datetime]] = None,
     default_end_offset: Optional[timedelta] = None,
+    *,
+    dry_run: bool = False,
+    metrics_path: Path | None = None,
+    dsl_mode: str | None = None,
+    limit: int = 0,
+    offset: int = 0,
+    engine: RuleEngine | None = None,
 ) -> ScanSummary:
     analysis_path = Path(analysis_path)
     findings_path = Path(findings_path)
     rules_path = Path(rules_path)
 
-    engine = RuleEngine(str(rules_path))
-    findings_path.parent.mkdir(parents=True, exist_ok=True)
+    policy = DslPolicy.from_mode(dsl_mode) if dsl_mode else None
+    engine = engine or RuleEngine(str(rules_path), policy=policy)
 
-    severity_counts: Counter = Counter()
-    total = 0
-    filtered_records: List[dict] = []
     channel_set = set(channel_ids) if channel_ids else None
     severity_allowed = set(severity_filter) if severity_filter else None
     start_at, end_at = (
@@ -68,39 +76,47 @@ def run_scan(
         else resolve_time_range(since, until, default_end_offset=default_end_offset)
     )
 
-    with analysis_path.open("r", encoding="utf-8") as src, findings_path.open(
-        "w", encoding="utf-8"
-    ) as dst:
-        for line in src:
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            if channel_set and payload.get("channel_id") not in channel_set:
-                continue
-            created_at = parse_created_at(payload.get("created_at"))
-            if created_at is not None and not (start_at <= created_at <= end_at):
-                continue
-            result = engine.evaluate(payload)
-            if severity_allowed and result.severity not in severity_allowed:
-                continue
-            payload["severity"] = result.severity
-            payload["rule_id"] = result.rule_id
-            payload["rule_title"] = result.rule_title
-            payload["reasons"] = result.reasons
-            payload["metrics"] = result.metrics
-            for message in payload.get("messages", []) or []:
-                message.setdefault("attachments", [])
-            json.dump(payload, dst, ensure_ascii=False)
-            dst.write("\n")
-            severity_counts[result.severity] += 1
-            total += 1
-            filtered_records.append(payload)
+    analysis_iter = iter_jsonl(
+        analysis_path,
+        limit=limit,
+        offset=offset,
+        policy=engine.policy,
+    )
+
+    def record_filter(record: dict) -> bool:
+        if channel_set and record.get("channel_id") not in channel_set:
+            return False
+        created_at = parse_created_at(record.get("created_at"))
+        if created_at is not None and not (start_at <= created_at <= end_at):
+            return False
+        return True
+
+    def result_filter(record: dict, result) -> bool:  # noqa: ANN202
+        if severity_allowed and result.severity not in severity_allowed:
+            return False
+        return True
+
+    collector: List[dict] = []
+    metrics_path = Path(metrics_path) if metrics_path else None
+
+    context = FindingsWriter(findings_path) if not dry_run else nullcontext(None)
+    with context as writer:
+        report = evaluate_stream(
+            engine,
+            analysis_iter,
+            writer=writer,
+            dry_run=dry_run,
+            metrics_path=metrics_path,
+            record_filter=record_filter,
+            result_filter=result_filter,
+            collector=collector,
+        )
 
     return ScanSummary(
-        total=total,
-        severity_counts=severity_counts,
+        total=report.total,
+        severity_counts=report.severity_counts,
         output_path=findings_path,
-        records=filtered_records,
+        records=collector,
     )
 
 

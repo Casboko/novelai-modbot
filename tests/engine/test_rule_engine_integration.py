@@ -39,6 +39,7 @@ def test_rule_engine_with_dsl_merges_result(tmp_path: Path) -> None:
         """,
     )
     engine = RuleEngine(config_path=str(config_path))
+    assert "dsl=" in engine.describe_config()
     record = {
         "wd14": {"rating": {"explicit": 0.7, "questionable": 0.1, "general": 0.1, "sensitive": 0.1}},
         "xsignals": {},

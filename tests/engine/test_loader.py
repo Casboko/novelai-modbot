@@ -5,9 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app.engine import DslValidationError
+from app.engine import DslValidationError, RuleConfigV2
 from app.engine.loader import load_rule_config
-from app.engine.types import RuleConfigV2
 
 
 def _write_yaml(tmp_path: Path, content: str) -> Path:
