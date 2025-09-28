@@ -298,3 +298,11 @@ python tools/export_uncertain.py \
 [^runpod-s3]: Runpod Documentation – Serverless Storage (S3-compatible API)
 [^discord-rate]: Discord API Docs – Rate Limits (グローバル 50 rps, 429 の `Retry-After`)
 [^onnx-ep]: ONNX Runtime Documentation – Execution Providers
+
+## 付録 C. p3 契約チェック
+
+- 出力契約の詳細: `docs/contracts/p3.md`
+- チェック手順:
+  - `python -m app.cli_contract check-findings --path out/p3_findings.jsonl`
+  - `python -m app.cli_contract check-report --path out/p3_report.csv`
+- CI やローカル検証で上記コマンドの終了コードが 0 であることを確認し、破壊的変更を早期検知します。

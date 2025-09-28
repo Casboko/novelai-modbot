@@ -112,20 +112,14 @@ class MetricsAggregator:
 
 class FindingsWriter:
     def __init__(self, path: Path) -> None:
+        """Write findings JSONL while enforcing the p3 contract."""
+
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.path.open("w", encoding="utf-8")
 
     def write(self, record: dict, result: EvaluationResult) -> tuple[dict, float]:
-        payload = deepcopy(record)
-        payload["severity"] = result.severity
-        payload["rule_id"] = result.rule_id
-        payload["rule_title"] = result.rule_title
-        payload["reasons"] = list(result.reasons)
-        payload["metrics"] = result.metrics
-        for message in payload.get("messages", []) or []:
-            if isinstance(message, dict):
-                message.setdefault("attachments", [])
+        payload = _build_contract_payload(record, result)
         t0 = time.perf_counter()
         json.dump(payload, self._handle, ensure_ascii=False)
         self._handle.write("\n")
@@ -146,6 +140,26 @@ class FindingsWriter:
 
 RecordFilter = Callable[[dict], bool]
 ResultFilter = Callable[[dict, EvaluationResult], bool]
+
+
+def _build_contract_payload(record: dict, result: EvaluationResult) -> dict:
+    payload = deepcopy(record)
+    payload.setdefault("rule_id", None)
+    payload.setdefault("rule_title", None)
+    payload.setdefault("metrics", {})
+    payload["severity"] = result.severity
+    payload["rule_id"] = result.rule_id
+    payload["rule_title"] = result.rule_title
+    payload["reasons"] = list(result.reasons)
+    metrics_data = result.metrics or {}
+    if isinstance(metrics_data, dict):
+        payload["metrics"] = dict(metrics_data)
+    else:
+        payload["metrics"] = dict(metrics_data)
+    for message in payload.get("messages", []) or []:
+        if isinstance(message, dict):
+            message.setdefault("attachments", [])
+    return payload
 
 
 def evaluate_stream(
@@ -176,21 +190,11 @@ def evaluate_stream(
         payload: Optional[dict] = None
         if not dry_run:
             if writer is None:
-                payload = deepcopy(record)
-                payload["severity"] = result.severity
-                payload["rule_id"] = result.rule_id
-                payload["rule_title"] = result.rule_title
-                payload["reasons"] = list(result.reasons)
-                payload["metrics"] = result.metrics
+                payload = _build_contract_payload(record, result)
             else:
                 payload, write_ms = writer.write(record, result)
         elif collected is not None:
-            payload = deepcopy(record)
-            payload["severity"] = result.severity
-            payload["rule_id"] = result.rule_id
-            payload["rule_title"] = result.rule_title
-            payload["reasons"] = list(result.reasons)
-            payload["metrics"] = result.metrics
+            payload = _build_contract_payload(record, result)
 
         metrics.update(result, latency_ms=latency_ms, write_ms=write_ms)
         if payload is not None and collected is not None:

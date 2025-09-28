@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "p3_findings record",
+  "type": "object",
+  "required": ["severity", "rule_id", "rule_title", "reasons", "metrics"],
+  "properties": {
+    "severity": { "type": "string", "enum": ["red", "orange", "yellow", "green"] },
+    "rule_id": { "type": ["string", "null"] },
+    "rule_title": { "type": ["string", "null"] },
+    "reasons": { "type": "array", "items": { "type": "string" } },
+    "metrics": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

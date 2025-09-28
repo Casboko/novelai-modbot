@@ -20,6 +20,30 @@ FINDINGS_PATH = Path("out/p3_findings.jsonl")
 REPORT_PATH = Path("out/p3_report.csv")
 ANALYSIS_PATH = Path("out/p2_analysis.jsonl")
 
+# CSV 列順の契約。順序変更は CLI/テストで検知する。
+P3_CSV_HEADER: tuple[str, ...] = (
+    "severity",
+    "rule_id",
+    "rule_title",
+    "message_link",
+    "author_id",
+    "is_nsfw_channel",
+    "wd14_rating_general",
+    "wd14_rating_sensitive",
+    "wd14_rating_questionable",
+    "wd14_rating_explicit",
+    "top_tags",
+    "nudity_tops",
+    "exposure_score",
+    "placement_risk_pre",
+    "nsfw_margin",
+    "nsfw_ratio",
+    "nsfw_general_sum",
+    "violence_tags",
+    "animals_sum",
+    "reasons",
+)
+
 
 @dataclass(slots=True)
 class ScanSummary:
@@ -61,6 +85,12 @@ def run_scan(
     offset: int = 0,
     engine: RuleEngine | None = None,
 ) -> ScanSummary:
+    """Evaluate analysis records and write findings adhering to the p3 contract.
+
+    FindingsWriter で出力する各レコードには少なくとも
+    `severity` / `rule_id` / `rule_title` / `reasons` / `metrics`
+    を含める必要があり、`metrics` はオブジェクト（将来拡張可）として扱う。
+    """
     analysis_path = Path(analysis_path)
     findings_path = Path(findings_path)
     rules_path = Path(rules_path)
@@ -201,31 +231,8 @@ def write_report_csv(records: Sequence[dict], report_path: Path, violence_tags: 
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with report_path.open("w", encoding="utf-8", newline="") as dst:
-        writer = csv.DictWriter(
-            dst,
-            fieldnames=[
-                "severity",
-                "rule_id",
-                "rule_title",
-                "message_link",
-                "author_id",
-                "is_nsfw_channel",
-                "wd14_rating_general",
-                "wd14_rating_sensitive",
-                "wd14_rating_questionable",
-                "wd14_rating_explicit",
-                "top_tags",
-                "nudity_tops",
-                "exposure_score",
-                "placement_risk_pre",
-                "nsfw_margin",
-                "nsfw_ratio",
-                "nsfw_general_sum",
-                "violence_tags",
-                "animals_sum",
-                "reasons",
-            ],
-        )
+        writer = csv.DictWriter(dst, fieldnames=list(P3_CSV_HEADER), lineterminator="\n")
+        assert list(writer.fieldnames or []) == list(P3_CSV_HEADER)
         writer.writeheader()
         rows = 0
         for payload in records:

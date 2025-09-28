@@ -594,6 +594,7 @@ def build_record_embed(
     preview: PreviewInfo,
     author: Optional[discord.abc.User] = None,
 ) -> discord.Embed:
+    """Render a record embed using rule_title → rule_id → 既定タイトルの順でフォールバックする。"""
     severity = record.get("severity", "green")
     color = severity_color(severity)
     base_title = record.get("rule_title") or record.get("rule_id") or DEFAULT_RECORD_TITLE

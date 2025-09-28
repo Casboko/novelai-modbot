@@ -10,3 +10,4 @@ pandas
 huggingface_hub
 PyYAML
 aiosqlite
+jsonschema>=4.20,<5
