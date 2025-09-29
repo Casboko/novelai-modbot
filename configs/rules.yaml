@@ -18,23 +18,220 @@ rule_titles:
 
 groups:
   nsfw_general:
+    - anal
+    - anus
+    - bdsm
     - bikini
+    - bondage
+    - bottomless
+    - cameltoe
+    - censored
+    - cleft_of_venus
+    - clitoris
+    - collar
+    - cum
+    - cunnilingus
+    - dildo
+    - ejaculation
+    - fellatio
+    - futanari
+    - gangbang
+    - group_sex
+    - lactation
+    - leash
     - lingerie
+    - masturbation
+    - mosaic_censoring
+    - nipples
+    - nude
+    - object_insertion
+    - oral
+    - orgasm
+    - orgy
+    - paizuri
+    - pee
+    - penetration
+    - penis
+    - pregnant
+    - pubic_hair
+    - pussy
+    - pussy_juice
+    - rape
+    - scat
     - see_through
+    - sex
+    - sex_toy
+    - slave
+    - spanking
+    - testicles
+    - topless
+    - uncensored
     - underboob
+    - vaginal
+    - vibrator
+  minors:
+    - adolescent
+    - baby
+    - chibi
+    - child
+    - flat_chest
+    - infant
+    - kid
+    - little_boy
+    - little_girl
+    - loli
+    - newborn
+    - preteen
+    - randoseru
+    - school_uniform
+    - schoolboy
+    - schoolgirl
+    - shota
+    - small_breasts
+    - teen
+    - toddler
+    - young
+    - younger
+  violence:
+    - abuse
+    - bullying
+    - strangulation
+    - torture
+    - whipping
+    - burn
+    - bruise
+    - scar
+    - wound
+    - cuts
+    - slash
+    - stab
+    - gunshot
+    - war
+    - murder
+    - death
+    - corpse
+    - decapitation
+    - dismemberment
+    - severed_arm
+    - severed_head
+    - severed_leg
+    - disembowelment
+    - cannibalism
+    - mutilation
+    - gore
+    - guts
+    - blood
+    - vore
+    - asphyxiation
+    - drowning
+    - electrocution
+    - poison
+    - execution
+    - ryona
+    - guro
+    - necrophilia
+    - addiction
+    - cocaine
+    - heroin
+    - lsd
+    - marijuana
+    - meth
+    - drug
+    - pill
+    - syringe
+    - injection
+  gore:
+    - blood
+    - gore
+    - guts
+    - wound
+    - severed_arm
+    - severed_head
+    - severed_leg
+    - decapitation
+    - disembowelment
+    - dismemberment
+    - corpse
+    - bruise
+    - scar
+    - injury
+  drugs:
+    - drug
+    - drugs
+    - marijuana
+    - cocaine
+    - heroin
+    - meth
+    - lsd
+    - pill
+    - syringe
+    - injection
+    - addiction
+    - poison
+  animal_subjects:
+    - amphibian
+    - bear
+    - bird
+    - cat
+    - cow
+    - deer
+    - dog
+    - dragon
+    - elephant
+    - fish
+    - fox
+    - furry
+    - goat
+    - horse
+    - insect
+    - kemono
+    - lion
+    - monkey
+    - pig
+    - pokemon
+    - rabbit
+    - reptile
+    - rodent
+    - sheep
+    - snake
+    - tiger
+    - unicorn
+    - wolf
   animal_contexts:
     - animal_abuse
-    - animal_harm
-    - animal_gore
+    - animal_corpse
     - animal_cruelty
-  animal_subjects:
-    - dog
-    - cat
-    - horse
-    - bird
+    - animal_gore
+    - animal_harm
+    - animal_neglect
+    - animal_starvation
+    - animal_torture
+    - animal_trap
+    - animal_fight
+    - animal_blood
+    - bestiality
+    - zoophilia
+    - zoosadism
+    - dead_animal
+    - feral_abuse
+    - furry_bestiality
+    - hunting
+    - taxidermy
+    - yiff
 
 features:
   nsfw_margin: "max(rating.explicit, rating.questionable) - max(rating.general, rating.sensitive)"
+  nsfw_ratio: "(rating.explicit + rating.questionable) / clamp(rating.explicit + rating.questionable + rating.general + rating.sensitive, 1e-6, 1e6)"
+  nsfw_general_sum: "sum('nsfw_general')"
+  violence_sum: "sum('violence')"
+  violence_max: "max('violence')"
+  minors_sum: "sum('minors')"
+  minors_max: "max('minors')"
+  animals_sum: "sum('animal_subjects') + sum('animal_contexts')"
+  animals_max: "max('animal_subjects')"
+  gore_sum: "sum('gore')"
+  gore_max: "max('gore')"
+  drug_score: "sum('drugs')"
   animal_combo: "max('animal_contexts') * max('animal_subjects')"
 
 rules:
@@ -44,227 +241,12 @@ rules:
     when: "(!channel.is_nsfw) && (nsfw_margin >= 0.10 || any('nsfw_general', gt=0.35))"
     reasons:
       - "margin={nsfw_margin:.2f}"
+      - "general={nsfw_general_sum:.2f}"
   - id: RED-ANIMAL-GORE-302
     severity: red
     priority: 20
     when: "max('animal_contexts') >= 0.25 || (animal_combo >= 0.04)"
     reasons:
-      - "ctx={max('animal_contexts'):.2f}"
+      - "context={max('animal_contexts'):.2f}"
       - "combo={animal_combo:.2f}"
     stop: true
-
-models:
-  wd14_repo: "SmilingWolf/wd-eva02-large-tagger-v3"
-
-thresholds:
-  wd14_questionable: 0.35
-  wd14_explicit: 0.20
-  wd14_minors_sum: 0.40
-  gore_tag: 0.25
-  gore_sum: 0.40
-  gore_any: 0.30
-  nsfw_margin_min: 0.00
-  nsfw_ratio_min: 0.45
-  nsfw_general_sum: 0.20
-  exposure_mid: 0.30
-  exposure_strong: 0.60
-  exposure_risk: 0.60
-  yellow_minor_hint: 0.20
-  sexual_explicit_sum_med: 0.10
-  sexual_explicit_sum_high: 0.15
-  sexual_modifier_sum_min: 0.10
-  animal_subject_min: 0.35
-  minor_peak_min: 0.20
-  gore_peak_min: 0.30
-  gore_sum_min: 0.40
-  dismember_peak_min: 0.20
-  mild_exposure_peak_min: 0.30
-  drug_any_min: 0.15
-
-minor_tags:
-  - loli
-  - shota
-  - child
-  - kid
-  - newborn
-  - baby
-  - infant
-  - toddler
-  - preteen
-  - teen
-  - young
-  - younger
-  - adolescent
-  - little_girl
-  - little_boy
-  - schoolgirl
-  - schoolboy
-  - school_uniform
-  - randoseru
-  - flat_chest
-  - small_breasts
-  - chibi
-
-violence_tags:
-  - gore
-  - blood
-  - guts
-  - wound
-  - severed_arm
-  - severed_leg
-  - severed_head
-  - decapitation
-  - disembowelment
-  - dismemberment
-  - guro
-  - ryona
-  - death
-  - corpse
-  - injury
-  - cuts
-  - bruise
-  - scar
-  - torture
-  - whipping
-  - burn
-  - murder
-  - strangulation
-  - asphyxiation
-  - drowning
-  - electrocution
-  - poison
-  - stab
-  - slash
-  - gunshot
-  - cannibalism
-  - vore
-  - mutilation
-  - necrophilia
-  - abuse
-  - bullying
-  - rape
-  - execution
-  - war
-  - drug
-  - pill
-  - syringe
-  - injection
-  - marijuana
-  - cocaine
-  - heroin
-  - meth
-  - lsd
-  - addiction
-
-nsfw_general_tags:
-  - nude
-  - topless
-  - bottomless
-  - nipples
-  - penis
-  - testicles
-  - pussy
-  - clitoris
-  - cameltoe
-  - cleft_of_venus
-  - futanari
-  - anus
-  - pubic_hair
-  - uncensored
-  - censored
-  - mosaic_censoring
-  - cum
-  - pussy_juice
-  - pee
-  - scat
-  - sex
-  - vaginal
-  - anal
-  - oral
-  - paizuri
-  - fellatio
-  - cunnilingus
-  - penetration
-  - masturbation
-  - ejaculation
-  - orgasm
-  - group_sex
-  - gangbang
-  - orgy
-  - rape
-  - bondage
-  - sex_toy
-  - dildo
-  - vibrator
-  - object_insertion
-  - bdsm
-  - spanking
-  - collar
-  - leash
-  - slave
-  - lactation
-  - pregnant
-
-animal_abuse_tags:
-  - animal_abuse
-  - animal_cruelty
-  - animal_blood
-  - animal_gore
-  - bestiality
-  - zoophilia
-  - zoosadism
-  - animal_harm
-  - animal_torture
-  - dead_animal
-  - taxidermy
-  - animal_fight
-  - animal_trap
-  - animal_starvation
-  - animal_neglect
-  - feral_abuse
-  - furry_bestiality
-  - yiff
-  - animal_corpse
-  - hunting
-  - dog
-  - cat
-  - horse
-  - bird
-  - rabbit
-  - cow
-  - pig
-  - snake
-  - insect
-  - furry
-  - wolf
-  - fox
-  - lion
-  - tiger
-  - bear
-  - deer
-  - sheep
-  - goat
-  - fish
-  - reptile
-  - amphibian
-  - rodent
-  - monkey
-  - elephant
-  - dragon
-  - unicorn
-  - pokemon
-  - anthro
-  - kemono
-
-xsignals_weights:
-  exposure_strong_weight: 1.0
-  exposure_weak_weight: 0.6
-  placement_rating_weight: 0.5
-  placement_general_weight: 0.3
-  placement_exposure_weight: 0.7
-  placement_general_topk: 3
-
-severity_priority:
-  red: 3
-  orange: 2
-  yellow: 1

@@ -67,7 +67,7 @@ class MetricsAggregator:
     def __init__(self, sample_capacity: int = 4096) -> None:
         self.total = 0
         self.severity = Counter({"red": 0, "orange": 0, "yellow": 0, "green": 0})
-        self.winning = Counter({"legacy": 0, "dsl": 0})
+        self.winning = Counter()
         self.rule_hits = Counter()
         self.latency_sum = 0.0
         self.latency_reservoir = ReservoirSampler(sample_capacity)
@@ -77,7 +77,7 @@ class MetricsAggregator:
         self.total += 1
         self.severity[result.severity] += 1
         winning_info = result.metrics.get("winning") if isinstance(result.metrics, dict) else None
-        origin = "legacy"
+        origin = "dsl"
         rule_id = result.rule_id
         if isinstance(winning_info, dict):
             origin = str(winning_info.get("origin", origin))
@@ -92,11 +92,12 @@ class MetricsAggregator:
     def finalize(self, wall_time_s: float) -> MetricsReport:
         avg = (self.latency_sum / self.total) if self.total else 0.0
         p95 = self.latency_reservoir.percentile(95.0)
-        total_wins = max(1, self.winning.get("legacy", 0) + self.winning.get("dsl", 0))
+        total_wins = max(1, sum(self.winning.values()))
         winning_ratio = {
-            "legacy": round(self.winning.get("legacy", 0) / total_wins, 6),
-            "dsl": round(self.winning.get("dsl", 0) / total_wins, 6),
+            origin: round(count / total_wins, 6)
+            for origin, count in self.winning.items()
         }
+        winning_ratio.setdefault("dsl", winning_ratio.get("dsl", 0.0))
         return MetricsReport(
             total=self.total,
             severity_counts=Counter(self.severity),

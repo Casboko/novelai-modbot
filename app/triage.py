@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import re
@@ -8,8 +9,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
+from .engine.group_utils import group_top_tags
+from .engine.tag_norm import normalize_pair
 from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
 from .p3_stream import FindingsWriter, evaluate_stream
@@ -165,7 +168,7 @@ def generate_report(
     rules_path = Path(rules_path)
 
     engine = RuleEngine(str(rules_path))
-    violence_tags = set(engine.config.violence_tags)
+    violence_patterns = engine.groups.get("violence", ())
 
     allowed = {"red", "orange", "yellow", "green"}
     severity_filter: Optional[List[str]]
@@ -186,10 +189,50 @@ def generate_report(
         default_end_offset=default_end_offset,
     )
 
-    rows = write_report_csv(records, report_path, violence_tags)
+    rows = write_report_csv(records, report_path, violence_patterns)
 
     selected = ",".join(severity_filter) if severity_filter else None
     return ReportSummary(rows=rows, path=report_path, severity_filter=selected)
+
+
+def iter_findings(
+    findings_path: Path | str = FINDINGS_PATH,
+    channel_ids: Optional[Sequence[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    severity: Optional[Sequence[str]] = None,
+    time_range: Optional[tuple[datetime, datetime]] = None,
+    default_end_offset: Optional[timedelta] = None,
+    limit: Optional[int] = None,
+) -> Iterator[dict]:
+    findings_path = Path(findings_path)
+    channel_set = set(channel_ids) if channel_ids else None
+    severity_set = set(severity) if severity else None
+    start_at, end_at = (
+        time_range
+        if time_range is not None
+        else resolve_time_range(since, until, default_end_offset=default_end_offset)
+    )
+
+    yielded = 0
+    with findings_path.open("r", encoding="utf-8") as src:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if severity_set and payload.get("severity") not in severity_set:
+                continue
+            if channel_set and payload.get("channel_id") not in channel_set:
+                continue
+            created_at = parse_created_at(payload.get("created_at"))
+            if created_at is not None and not (start_at <= created_at <= end_at):
+                continue
+            yield payload
+            if limit is not None:
+                yielded += 1
+                if yielded >= limit:
+                    break
 
 
 def load_findings(
@@ -200,34 +243,50 @@ def load_findings(
     severity: Optional[Sequence[str]] = None,
     time_range: Optional[tuple[datetime, datetime]] = None,
     default_end_offset: Optional[timedelta] = None,
+    limit: Optional[int] = None,
 ) -> List[dict]:
-    findings_path = Path(findings_path)
-    channel_set = set(channel_ids) if channel_ids else None
-    severity_set = set(severity) if severity else None
-    start_at, end_at = (
-        time_range
-        if time_range is not None
-        else resolve_time_range(since, until, default_end_offset=default_end_offset)
+    return list(
+        iter_findings(
+            findings_path,
+            channel_ids=channel_ids,
+            since=since,
+            until=until,
+            severity=severity,
+            time_range=time_range,
+            default_end_offset=default_end_offset,
+            limit=limit,
+        )
     )
 
-    records: List[dict] = []
-    with findings_path.open("r", encoding="utf-8") as src:
-        for line in src:
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            if severity_set and payload.get("severity") not in severity_set:
-                continue
-            if channel_set and payload.get("channel_id") not in channel_set:
-                continue
-            created_at = parse_created_at(payload.get("created_at"))
-            if created_at is not None and not (start_at <= created_at <= end_at):
-                continue
-            records.append(payload)
-    return records
+
+async def load_findings_async(
+    findings_path: Path | str = FINDINGS_PATH,
+    channel_ids: Optional[Sequence[str]] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    severity: Optional[Sequence[str]] = None,
+    time_range: Optional[tuple[datetime, datetime]] = None,
+    default_end_offset: Optional[timedelta] = None,
+    limit: Optional[int] = None,
+) -> List[dict]:
+    args = dict(
+        findings_path=findings_path,
+        channel_ids=channel_ids,
+        since=since,
+        until=until,
+        severity=severity,
+        time_range=time_range,
+        default_end_offset=default_end_offset,
+        limit=limit,
+    )
+    return await asyncio.to_thread(lambda: load_findings(**args))
 
 
-def write_report_csv(records: Sequence[dict], report_path: Path, violence_tags: set[str]) -> int:
+def write_report_csv(
+    records: Sequence[dict],
+    report_path: Path,
+    violence_patterns: Sequence[str],
+) -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     with report_path.open("w", encoding="utf-8", newline="") as dst:
@@ -244,11 +303,9 @@ def write_report_csv(records: Sequence[dict], report_path: Path, violence_tags: 
             formatted_tags = _format_top_tags(general)
             top_tags = ", ".join(formatted_tags)
             nudity = ", ".join(_format_top_detections(payload.get("nudity_detections", [])))
-            violence = ", ".join(
-                tag.split(":")[0]
-                for tag in formatted_tags
-                if tag.split(":")[0] in violence_tags
-            )
+            tag_scores = _build_tag_scores(general)
+            violence_hits = group_top_tags(tag_scores, violence_patterns, k=5, min_score=0.1)
+            violence = ", ".join(name for name, _ in violence_hits)
             metrics = payload.get("metrics", {})
             writer.writerow(
                 {
@@ -277,6 +334,19 @@ def write_report_csv(records: Sequence[dict], report_path: Path, violence_tags: 
             rows += 1
 
     return rows
+
+
+def _build_tag_scores(general: Iterable) -> Dict[str, float]:
+    scores: Dict[str, float] = {}
+    for item in general:
+        pair = normalize_pair(item)
+        if pair is None:
+            continue
+        tag, score = pair
+        current = scores.get(tag)
+        if current is None or score > current:
+            scores[tag] = score
+    return scores
 
 
 def _format_top_tags(general: Iterable) -> List[str]:

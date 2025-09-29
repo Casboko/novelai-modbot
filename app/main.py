@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-import json
 from pathlib import Path
 from typing import Any, Iterable, List, NamedTuple, Optional, Sequence
 
@@ -13,7 +12,7 @@ from discord import app_commands
 from .config import get_settings
 from .discord_client import create_client
 from .rule_engine import RuleEngine
-from .triage import load_findings, resolve_time_range, run_scan, write_report_csv
+from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
 from .store import Ticket, TicketStore
 from .util import parse_message_link
 
@@ -49,6 +48,8 @@ SEVERITY_OPTION_LABELS = {
     "green": "緑のみ",
 }
 DEFAULT_RECORD_TITLE = "モデレーション検知"
+UTC_MIN = datetime.min.replace(tzinfo=timezone.utc)
+UTC_MAX = datetime.max.replace(tzinfo=timezone.utc)
 
 
 def build_jump_link(gid: int, cid: int, mid: int) -> str:
@@ -210,17 +211,10 @@ def find_record_for_message(channel_id: int, message_id: int) -> Optional[dict]:
     path = Path("out/p3_findings.jsonl")
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as fp:
-        for line in fp:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _record_matches_message(record, channel_id, message_id):
-                return record
+    time_range = (UTC_MIN, UTC_MAX)
+    for record in iter_findings(path, time_range=time_range):
+        if _record_matches_message(record, channel_id, message_id):
+            return record
     return None
 
 
@@ -236,22 +230,15 @@ def load_findings_index() -> dict[tuple[int, int], dict]:
             return None
 
     index: dict[tuple[int, int], dict] = {}
-    with path.open("r", encoding="utf-8") as fp:
-        for line in fp:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            key = _key(record.get("channel_id"), record.get("message_id"))
-            if key is not None:
+    time_range = (UTC_MIN, UTC_MAX)
+    for record in iter_findings(path, time_range=time_range):
+        key = _key(record.get("channel_id"), record.get("message_id"))
+        if key is not None:
+            index[key] = record
+        for msg in record.get("messages", []) or []:
+            key = _key(msg.get("channel_id"), msg.get("message_id"))
+            if key is not None and key not in index:
                 index[key] = record
-            for msg in record.get("messages", []) or []:
-                key = _key(msg.get("channel_id"), msg.get("message_id"))
-                if key is not None and key not in index:
-                    index[key] = record
     return index
 
 
@@ -675,21 +662,21 @@ def build_record_embed(
     return embed
 
 
-class ReportPaginator(discord.ui.View):
+class RecordPaginatorBase(discord.ui.View):
     def __init__(
         self,
         client: discord.Client,
         settings,
-        ticket_store: TicketStore,
-        records: Sequence[dict],
         requester: discord.User,
+        items: Sequence[Any],
+        *,
+        timeout: int = 600,
     ) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=timeout)
         self.client = client
         self.settings = settings
-        self.ticket_store = ticket_store
-        self.records = list(records)
         self.requester = requester
+        self.items = list(items)
         self.index = 0
         self.message: Optional[discord.Message] = None
         self._preview_cache: dict[tuple[int, int, str], PreviewInfo] = {}
@@ -726,70 +713,38 @@ class ReportPaginator(discord.ui.View):
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
         if self.message:
-            await self.message.edit(view=self)
+            success = await self._safe_edit_message(view=self)
+            if not success:
+                logger.debug("view message became unavailable on timeout")
 
+    def _empty_message(self) -> str:
+        raise NotImplementedError
 
-class TicketPaginator(discord.ui.View):
-    def __init__(
+    def _record_from_item(self, item: Any) -> dict:
+        raise NotImplementedError
+
+    def _build_embed(
         self,
-        client: discord.Client,
-        settings,
-        ticket_store: TicketStore,
-        entries: Sequence[TicketEntry],
-        requester: discord.User,
-    ) -> None:
-        super().__init__(timeout=600)
-        self.client = client
-        self.settings = settings
-        self.ticket_store = ticket_store
-        self.entries = list(entries)
-        self.requester = requester
-        self.index = 0
-        self.message: Optional[discord.Message] = None
-        self._preview_cache: dict[tuple[int, int, str], PreviewInfo] = {}
-        self._member_cache: dict[int, discord.Member] = {}
-        self._current_preview: PreviewInfo | None = None
-        self._open_message_button = discord.ui.Button(
-            label="投稿を開く",
-            style=discord.ButtonStyle.link,
-            url="https://discord.com",
-            row=1,
-            disabled=True,
-        )
-        self._open_original_button = discord.ui.Button(
-            label="元画像を開く",
-            style=discord.ButtonStyle.link,
-            url="https://discord.com",
-            disabled=True,
-            row=1,
-        )
-        self.add_item(self._open_message_button)
-        self.add_item(self._open_original_button)
+        record: dict,
+        preview: PreviewInfo,
+        author: Optional[discord.abc.User],
+        *,
+        index: int,
+        total: int,
+    ) -> discord.Embed:
+        raise NotImplementedError
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.requester.id:
-            await interaction.response.send_message(
-                "このビューを操作できるのは発行者のみです。",
-                ephemeral=True,
-            )
-            return False
-        return True
+    def _update_additional_buttons(self, has_items: bool) -> None:
+        return
 
-    async def on_timeout(self) -> None:
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        if self.message:
-            await self.message.edit(view=self)
+    def _has_items(self) -> bool:
+        return bool(self.items)
 
-    def _current_entry(self) -> TicketEntry:
-        return self.entries[self.index]
+    def _current_item(self) -> Any:
+        return self.items[self.index]
 
     def _current_record(self) -> dict:
-        return self._current_entry().record
-
-    def _current_ticket(self) -> Ticket:
-        return self._current_entry().ticket
+        return self._record_from_item(self._current_item())
 
     def _record_key(self, record: dict) -> Optional[tuple[int, int, str]]:
         channel_id = record.get("channel_id") or (record.get("messages") or [{}])[0].get("channel_id")
@@ -801,23 +756,6 @@ class TicketPaginator(discord.ui.View):
             except (TypeError, ValueError):
                 return None
         return None
-
-    def _build_embed(self, preview: PreviewInfo, author: Optional[discord.abc.User]) -> discord.Embed:
-        embed = build_record_embed(
-            self._current_record(),
-            self.index,
-            len(self.entries),
-            preview,
-            author,
-        )
-        ticket = self._current_ticket()
-        due_local = ticket.due_at.astimezone(JST)
-        embed.add_field(name="通知期限", value=f"{due_local:%Y-%m-%d %H:%M} JST", inline=False)
-        embed.add_field(name="チケットID", value=ticket.ticket_id, inline=False)
-        footer_text = embed.footer.text if embed.footer else ""
-        footer_parts = [part for part in (footer_text, f"ticket={ticket.ticket_id}") if part]
-        embed.set_footer(text=" ・ ".join(footer_parts))
-        return embed
 
     async def _resolve_member(self, record: dict) -> Optional[discord.Member]:
         author_id = record.get("author_id") or (record.get("messages") or [{}])[0].get("author_id")
@@ -831,7 +769,11 @@ class TicketPaginator(discord.ui.View):
         if cached:
             return cached
         guild = None
-        preferred_guild_id = self.settings.guild_id or record.get("guild_id") or (record.get("messages") or [{}])[0].get("guild_id")
+        preferred_guild_id = (
+            self.settings.guild_id
+            or record.get("guild_id")
+            or (record.get("messages") or [{}])[0].get("guild_id")
+        )
         if preferred_guild_id:
             try:
                 gid = int(preferred_guild_id)
@@ -849,8 +791,9 @@ class TicketPaginator(discord.ui.View):
         self._member_cache[author_int] = member
         return member
 
-    async def _ensure_preview(self) -> PreviewInfo:
-        record = self._current_record()
+    async def _ensure_preview(self, record: Optional[dict] = None) -> PreviewInfo:
+        if record is None:
+            record = self._current_record()
         key = self._record_key(record)
         if key and key in self._preview_cache:
             return self._preview_cache[key]
@@ -898,7 +841,7 @@ class TicketPaginator(discord.ui.View):
         if attachment is None:
             attachment = first_image_from_messages(record.get("messages", []))
         if attachment is None:
-            targets = self._message_targets()
+            targets = self._message_targets_for(record)
             if targets:
                 try:
                     message = await _fetch_message(self.client, targets[0], targets[1])
@@ -936,23 +879,64 @@ class TicketPaginator(discord.ui.View):
         is_spoiler = bool(attachment.get("is_spoiler"))
         return PreviewInfo(thumbnail_url, image_url, original_url, is_spoiler)
 
+    def _message_targets(self) -> Optional[tuple[int, int]]:
+        if not self._has_items():
+            return None
+        return self._message_targets_for(self._current_record())
+
+    def _message_targets_for(self, record: dict) -> Optional[tuple[int, int]]:
+        channel_id = record.get("channel_id")
+        message_id = record.get("message_id")
+        try:
+            if channel_id is not None and message_id is not None:
+                return int(channel_id), int(message_id)
+        except (TypeError, ValueError):
+            pass
+        messages = record.get("messages") or []
+        if not messages:
+            return None
+        entry = messages[0]
+        try:
+            return int(entry.get("channel_id")), int(entry.get("message_id"))
+        except (TypeError, ValueError):
+            return None
+
+    async def _safe_edit_message(self, **kwargs) -> bool:
+        if not self.message:
+            return False
+        try:
+            await self.message.edit(**kwargs)
+            return True
+        except discord.HTTPException as exc:
+            if exc.status in {401, 404}:
+                logger.warning("view message edit failed (%s), detaching view", exc.status)
+                self.message = None
+                return False
+            raise
+
+    async def _jump_to_index(self, new_index: int) -> None:
+        if not self._has_items():
+            return
+        clamped = max(0, min(new_index, len(self.items) - 1))
+        if clamped != self.index:
+            self.index = clamped
+            self._current_preview = None
+        await self._refresh_message()
+
     def _update_button_state(self) -> None:
-        has_entries = bool(self.entries)
+        has_items = self._has_items()
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 if child.custom_id == "prev":
-                    child.disabled = not has_entries or self.index == 0
+                    child.disabled = not has_items or self.index == 0
                 elif child.custom_id == "next":
-                    child.disabled = not has_entries or self.index >= len(self.entries) - 1
-                elif child.custom_id == "log":
-                    child.disabled = not has_entries or not bool(self.settings.log_channel_id)
-                elif child.custom_id == "cancel":
-                    child.disabled = not has_entries or self._message_targets() is None
-        if not has_entries:
+                    child.disabled = not has_items or self.index >= len(self.items) - 1
+        if not has_items:
             self._open_message_button.url = "https://discord.com"
             self._open_message_button.disabled = True
             self._open_original_button.url = "https://discord.com"
             self._open_original_button.disabled = True
+            self._update_additional_buttons(has_items)
             return
         record = self._current_record()
         message_url = record.get("message_link")
@@ -969,66 +953,515 @@ class TicketPaginator(discord.ui.View):
         else:
             self._open_original_button.url = message_url or "https://discord.com"
             self._open_original_button.disabled = True
+        self._update_additional_buttons(has_items)
+
+    @discord.ui.button(label="ページ指定", style=discord.ButtonStyle.secondary, custom_id="jump", row=0)
+    async def on_jump(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
+            return
+        total = len(self.items)
+        modal = _PageJumpModal(self, total)
+        await interaction.response.send_modal(modal)
 
     async def send_initial(self, interaction: discord.Interaction) -> None:
-        if not self.entries:
-            await interaction.followup.send("通知待ちのチケットはありません。", ephemeral=True)
+        if not self._has_items():
+            await interaction.followup.send(self._empty_message(), ephemeral=True)
             return
-        self._current_preview = await self._ensure_preview()
-        author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(self._current_preview, author)
+        self.index = min(self.index, len(self.items) - 1)
+        record = self._current_record()
+        self._current_preview = await self._ensure_preview(record)
+        author = await self._resolve_member(record)
+        embed = self._build_embed(
+            record,
+            self._current_preview,
+            author,
+            index=self.index,
+            total=len(self.items),
+        )
         self._update_button_state()
         self.message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
 
     async def _respond_refresh(self, interaction: discord.Interaction) -> None:
-        if not self.entries:
-            await interaction.response.edit_message(content="通知待ちのチケットはありません。", embed=None, view=None)
+        if not self._has_items():
+            await interaction.response.edit_message(content=self._empty_message(), embed=None, view=None)
             return
-        self._current_preview = await self._ensure_preview()
-        author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(self._current_preview, author)
+        record = self._current_record()
+        self._current_preview = await self._ensure_preview(record)
+        author = await self._resolve_member(record)
+        embed = self._build_embed(
+            record,
+            self._current_preview,
+            author,
+            index=self.index,
+            total=len(self.items),
+        )
         self._update_button_state()
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _refresh_message(self) -> None:
         if not self.message:
             return
-        if not self.entries:
+        if not self._has_items():
             self._update_button_state()
-            await self.message.edit(content="通知待ちのチケットはありません。", embed=None, view=None)
+            success = await self._safe_edit_message(
+                content=self._empty_message(),
+                embed=None,
+                view=None,
+            )
+            if not success:
+                logger.debug("view message became unavailable while clearing content")
             return
-        self._current_preview = await self._ensure_preview()
-        author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(self._current_preview, author)
-        self._update_button_state()
-        await self.message.edit(embed=embed, view=self)
-
-    def _message_targets(self) -> Optional[tuple[int, int]]:
-        if not self.entries:
-            return None
         record = self._current_record()
-        messages = record.get("messages") or []
-        if not messages:
-            return None
-        entry = messages[0]
-        try:
-            return int(entry.get("channel_id")), int(entry.get("message_id"))
-        except (TypeError, ValueError):
-            return None
+        self._current_preview = await self._ensure_preview(record)
+        author = await self._resolve_member(record)
+        embed = self._build_embed(
+            record,
+            self._current_preview,
+            author,
+            index=self.index,
+            total=len(self.items),
+        )
+        self._update_button_state()
+        success = await self._safe_edit_message(embed=embed, view=self)
+        if not success:
+            logger.debug("view message became unavailable while refreshing")
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="prev", row=0)
     async def on_prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not self.entries:
-            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
             return
         if self.index > 0:
             self.index -= 1
         await self._respond_refresh(interaction)
 
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next", row=0)
+    async def on_next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
+            return
+        if self.index < len(self.items) - 1:
+            self.index += 1
+        await self._respond_refresh(interaction)
+
+
+class _PageJumpModal(discord.ui.Modal):
+    def __init__(self, paginator: RecordPaginatorBase, total: int) -> None:
+        super().__init__(title="ページ指定")
+        self.paginator = paginator
+        self.total = total
+        placeholder = f"1 〜 {max(total, 1)}"
+        self.page_input = discord.ui.TextInput(
+            label="ページ番号",
+            placeholder=placeholder,
+            min_length=1,
+            max_length=7,
+        )
+        self.add_item(self.page_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        total = len(self.paginator.items)
+        if total == 0:
+            await interaction.response.send_message(
+                self.paginator._empty_message(),
+                ephemeral=True,
+            )
+            return
+        raw_value = self.page_input.value.strip()
+        try:
+            page = int(raw_value)
+        except ValueError:
+            await interaction.response.send_message(
+                "整数のページ番号を入力してください。",
+                ephemeral=True,
+            )
+            return
+        if page < 1 or page > total:
+            await interaction.response.send_message(
+                f"1 〜 {total} の範囲で指定してください。",
+                ephemeral=True,
+            )
+            return
+        await self.paginator._jump_to_index(page - 1)
+        await interaction.response.send_message(
+            f"ページ {page}/{total} を表示しました。",
+            ephemeral=True,
+        )
+
+
+class ReportPaginator(RecordPaginatorBase):
+    def __init__(
+        self,
+        client: discord.Client,
+        settings,
+        ticket_store: TicketStore,
+        records: Sequence[dict],
+        requester: discord.User,
+    ) -> None:
+        super().__init__(client, settings, requester, records)
+        self.ticket_store = ticket_store
+        self._busy_actions: set[str] = set()
+        self._message_cache: dict[tuple[int, int], discord.Message] = {}
+
+    def _empty_message(self) -> str:
+        return "表示可能な検知がありません。"
+
+    def _record_from_item(self, item: Any) -> dict:
+        return item
+
+    def _update_additional_buttons(self, has_items: bool) -> None:
+        targets_available = has_items and self._message_targets() is not None
+        log_channel_available = bool(self.settings.log_channel_id)
+        for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
+            cid = child.custom_id
+            if cid == "notify":
+                child.disabled = (
+                    not has_items
+                    or not targets_available
+                    or self._is_action_busy("notify")
+                )
+            elif cid == "log":
+                child.disabled = (
+                    not has_items
+                    or not targets_available
+                    or not log_channel_available
+                    or self._is_action_busy("log")
+                )
+            elif cid == "delete":
+                child.disabled = (
+                    not has_items
+                    or not targets_available
+                    or self._is_action_busy("delete")
+                )
+
+    def _is_action_busy(self, action: str) -> bool:
+        return action in self._busy_actions
+
+    def _set_action_busy(self, action: str, value: bool) -> None:
+        if value:
+            self._busy_actions.add(action)
+        else:
+            self._busy_actions.discard(action)
+        self._update_button_state()
+
+    async def _fetch_current_message(self, *, use_cache: bool = True) -> Optional[discord.Message]:
+        targets = self._message_targets()
+        if targets is None:
+            return None
+        channel_id, message_id = targets
+        cache_key = (channel_id, message_id)
+        if use_cache and cache_key in self._message_cache:
+            return self._message_cache[cache_key]
+        try:
+            message = await _fetch_message(self.client, channel_id, message_id)
+        except discord.HTTPException:
+            return None
+        self._message_cache[cache_key] = message
+        return message
+
+    def _record_guild_id(self, record: dict) -> Optional[int]:
+        candidates = [record.get("guild_id")]
+        for entry in record.get("messages", []) or []:
+            candidates.append(entry.get("guild_id"))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                continue
+        if self.settings.guild_id:
+            try:
+                return int(self.settings.guild_id)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def _resolve_ticket(self, message: Optional[discord.Message]) -> Optional[Ticket]:
+        targets = self._message_targets()
+        if targets is None:
+            return None
+        channel_id, message_id = targets
+        guild_id = None
+        if message and message.guild:
+            guild_id = message.guild.id
+        if guild_id is None:
+            guild_id = self._record_guild_id(self._current_record())
+        if guild_id is None:
+            return None
+        ticket_id = TicketStore.build_ticket_id(guild_id, channel_id, message_id)
+        return await self.ticket_store.get_ticket(ticket_id)
+
+    async def _send_record_only_log(
+        self,
+        *,
+        action: str,
+        result: str,
+        record: dict,
+        message: Optional[discord.Message],
+        executor: discord.abc.User,
+    ) -> bool:
+        channel = await _resolve_log_channel(self.client, self.settings)
+        if channel is None:
+            return False
+        preview = self._current_preview or await self._ensure_preview(record)
+        author = message.author if message else None
+        embed = build_record_embed(record, self.index, len(self.items) or 1, preview, author)
+        embed.add_field(name="処理", value=action, inline=False)
+        embed.add_field(name="結果", value=result, inline=False)
+        footer_text = embed.footer.text if embed.footer else ""
+        footer_parts = [part for part in (footer_text, f"operator={executor.display_name}") if part]
+        embed.set_footer(text=" ・ ".join(footer_parts))
+        await channel.send(embed=embed)
+        return True
+
+    def _build_embed(
+        self,
+        record: dict,
+        preview: PreviewInfo,
+        author: Optional[discord.abc.User],
+        *,
+        index: int,
+        total: int,
+    ) -> discord.Embed:
+        return build_record_embed(record, index, total, preview, author)
+
+    def _clear_message_cache(self) -> None:
+        targets = self._message_targets()
+        if targets is None:
+            return
+        self._message_cache.pop(targets, None)
+
+    def _remove_current_item(self) -> None:
+        if not self._has_items():
+            return
+        self.items.pop(self.index)
+        if self.items and self.index >= len(self.items):
+            self.index = len(self.items) - 1
+        self._current_preview = None
+        self._clear_message_cache()
+
+    @discord.ui.button(label="通知", style=discord.ButtonStyle.primary, custom_id="notify", row=2)
+    async def on_notify(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
+            return
+        if self._message_targets() is None:
+            await interaction.response.send_message("対象メッセージを特定できませんでした。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        self._set_action_busy("notify", True)
+        try:
+            message = await self._fetch_current_message()
+            if message is None:
+                await interaction.followup.send("メッセージを取得できませんでした。", ephemeral=True)
+                return
+            record = self._current_record()
+            try:
+                guild_id = message.guild.id if message.guild else self._record_guild_id(record)
+                if guild_id is None:
+                    await interaction.followup.send("ギルド情報を特定できませんでした。", ephemeral=True)
+                    return
+                ticket, created, response = await process_notification(
+                    self.client,
+                    self.settings,
+                    self.ticket_store,
+                    guild_id=guild_id,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                    executor=interaction.user,
+                    record=record,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("notify failed")
+                await interaction.followup.send(f"通知に失敗しました: {exc}", ephemeral=True)
+                return
+            await interaction.followup.send(response, ephemeral=True)
+        finally:
+            self._set_action_busy("notify", False)
+
+    @discord.ui.button(label="モデログ転送", style=discord.ButtonStyle.secondary, custom_id="log", row=2)
+    async def on_log(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
+            return
+        if not self.settings.log_channel_id:
+            await interaction.response.send_message("モデログ用チャンネルが設定されていません。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        self._set_action_busy("log", True)
+        try:
+            message = await self._fetch_current_message()
+            record = self._current_record()
+            ticket = await self._resolve_ticket(message)
+            action_label = "手動ログ"
+            executor = interaction.user
+            if ticket:
+                result_text = f"{executor.display_name} が手動でログを送信"
+                try:
+                    await send_ticket_log(
+                        self.client,
+                        self.settings,
+                        ticket,
+                        action=action_label,
+                        result=result_text,
+                        record=record,
+                        message=message,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("manual log failed")
+                    await interaction.followup.send(f"モデログへの送信に失敗しました: {exc}", ephemeral=True)
+                    return
+            else:
+                result_text = f"{executor.display_name} が手動でログを送信"
+                success = await self._send_record_only_log(
+                    action=action_label,
+                    result=result_text,
+                    record=record,
+                    message=message,
+                    executor=executor,
+                )
+                if not success:
+                    await interaction.followup.send("モデログチャンネルにアクセスできません。", ephemeral=True)
+                    return
+            await interaction.followup.send("モデログへ転送しました。", ephemeral=True)
+        finally:
+            self._set_action_busy("log", False)
+
+    @discord.ui.button(label="削除", style=discord.ButtonStyle.danger, custom_id="delete", row=2)
+    async def on_delete(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
+            return
+        if self._message_targets() is None:
+            await interaction.response.send_message("対象メッセージを特定できませんでした。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        self._set_action_busy("delete", True)
+        try:
+            message = await self._fetch_current_message(use_cache=False)
+            if message is None:
+                await interaction.followup.send("メッセージを取得できませんでした。", ephemeral=True)
+                return
+            record = self._current_record()
+            ticket = await self._resolve_ticket(message)
+            reason = build_audit_reason(ticket, "manual_delete") if ticket is not None else None
+            try:
+                if reason is not None:
+                    await message.delete(reason=reason)
+                else:
+                    await message.delete()
+            except TypeError as exc:
+                if "reason" not in str(exc):
+                    logger.exception("delete failed")
+                    await interaction.followup.send(f"削除に失敗しました: {exc}", ephemeral=True)
+                    return
+                await message.delete()
+            except discord.NotFound:
+                logger.info("message already deleted by another actor")
+            except discord.HTTPException as exc:
+                logger.exception("delete failed")
+                await interaction.followup.send(f"削除に失敗しました: {exc}", ephemeral=True)
+                return
+
+            executor = interaction.user
+            result_text = f"{executor.display_name} が投稿を削除しました"
+            if ticket is not None:
+                await self.ticket_store.update_status(ticket.ticket_id, status="mod_deleted")
+                await self.ticket_store.append_log(
+                    ticket_id=ticket.ticket_id,
+                    actor_id=executor.id,
+                    action="manual_delete",
+                    detail="モデレーターが削除",
+                )
+                await send_ticket_log(
+                    self.client,
+                    self.settings,
+                    ticket,
+                    action="モデレーター削除",
+                    result=result_text,
+                    record=record,
+                    message=message,
+                )
+            else:
+                success = await self._send_record_only_log(
+                    action="モデレーター削除",
+                    result=result_text,
+                    record=record,
+                    message=message,
+                    executor=executor,
+                )
+                if not success:
+                    await interaction.followup.send("モデログチャンネルにアクセスできません。", ephemeral=True)
+                    return
+
+            self._remove_current_item()
+            await self._refresh_message()
+            await interaction.followup.send("投稿を削除しました。", ephemeral=True)
+        finally:
+            self._set_action_busy("delete", False)
+
+
+class TicketPaginator(RecordPaginatorBase):
+    def __init__(
+        self,
+        client: discord.Client,
+        settings,
+        ticket_store: TicketStore,
+        entries: Sequence[TicketEntry],
+        requester: discord.User,
+    ) -> None:
+        super().__init__(client, settings, requester, entries)
+        self.ticket_store = ticket_store
+
+    def _empty_message(self) -> str:
+        return "通知待ちのチケットはありません。"
+
+    def _record_from_item(self, item: Any) -> dict:
+        entry: TicketEntry = item
+        return entry.record
+
+    def _current_entry(self) -> TicketEntry:
+        return self._current_item()
+
+    def _current_ticket(self) -> Ticket:
+        return self._current_entry().ticket
+
+    def _build_embed(
+        self,
+        record: dict,
+        preview: PreviewInfo,
+        author: Optional[discord.abc.User],
+        *,
+        index: int,
+        total: int,
+    ) -> discord.Embed:
+        embed = build_record_embed(record, index, total, preview, author)
+        ticket = self._current_ticket()
+        due_local = ticket.due_at.astimezone(JST)
+        embed.add_field(name="通知期限", value=f"{due_local:%Y-%m-%d %H:%M} JST", inline=False)
+        embed.add_field(name="チケットID", value=ticket.ticket_id, inline=False)
+        footer_text = embed.footer.text if embed.footer else ""
+        footer_parts = [part for part in (footer_text, f"ticket={ticket.ticket_id}") if part]
+        embed.set_footer(text=" ・ ".join(footer_parts))
+        return embed
+
+    def _update_additional_buttons(self, has_items: bool) -> None:
+        for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.custom_id == "log":
+                child.disabled = not has_items or not bool(self.settings.log_channel_id)
+            elif child.custom_id == "cancel":
+                child.disabled = not has_items or self._message_targets() is None
+
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.danger, custom_id="cancel", row=2)
     async def on_cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not self.entries:
-            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         entry = self._current_entry()
@@ -1041,18 +1474,18 @@ class TicketPaginator(discord.ui.View):
             record=entry.record,
         )
         if updated is not None:
-            self.entries.pop(self.index)
-            if self.entries:
-                if self.index >= len(self.entries):
-                    self.index = len(self.entries) - 1
+            self.items.pop(self.index)
+            if self.items:
+                if self.index >= len(self.items):
+                    self.index = len(self.items) - 1
                 self._current_preview = None
             await self._refresh_message()
         await interaction.followup.send(message_text, ephemeral=True)
 
     @discord.ui.button(label="モデログ転送", style=discord.ButtonStyle.secondary, custom_id="log", row=2)
     async def on_log(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not self.entries:
-            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
+        if not self._has_items():
+            await interaction.response.send_message(self._empty_message(), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         channel_id = self.settings.log_channel_id
@@ -1067,22 +1500,19 @@ class TicketPaginator(discord.ui.View):
                 logger.exception("fetch log channel failed")
                 await interaction.followup.send(f"モデログチャンネルにアクセスできません: {exc}", ephemeral=True)
                 return
-        preview = self._current_preview or await self._ensure_preview()
-        author = await self._resolve_member(self._current_record())
-        embed = self._build_embed(preview, author)
+        record = self._current_record()
+        preview = self._current_preview or await self._ensure_preview(record)
+        author = await self._resolve_member(record)
+        embed = self._build_embed(
+            record,
+            preview,
+            author,
+            index=self.index,
+            total=len(self.items),
+        )
         embed.set_footer(text=f"転送者: {interaction.user.display_name}")
         await channel.send(embed=embed)
         await interaction.followup.send("モデログへ転送しました。", ephemeral=True)
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next", row=0)
-    async def on_next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not self.entries:
-            await interaction.response.send_message("通知待ちのチケットはありません。", ephemeral=True)
-            return
-        if self.index < len(self.entries) - 1:
-            self.index += 1
-        await self._respond_refresh(interaction)
-
 
 def register_commands(
     client: discord.Client,
@@ -1265,7 +1695,7 @@ def register_commands(
         resolved_range = resolve_time_range(since, until, default_end_offset=default_end_offset)
 
         try:
-            records = load_findings(
+            records = await load_findings_async(
                 Path("out/p3_findings.jsonl"),
                 channel_ids=channel_ids,
                 since=since,
@@ -1290,9 +1720,10 @@ def register_commands(
             await view.send_initial(interaction)
 
         if send_csv:
-            violence_tags = set(RuleEngine().config.violence_tags)
+            engine = RuleEngine()
+            violence_patterns = engine.groups.get("violence", ())
             csv_path = Path("out/p3_report.csv")
-            rows = write_report_csv(records, csv_path, violence_tags)
+            rows = write_report_csv(records, csv_path, violence_patterns)
             with csv_path.open("rb") as fp:
                 severity_display = _severity_option_label(severity_value)
                 await interaction.followup.send(

@@ -11,6 +11,7 @@ __pycache__/
 
 # Scanner outputs
 out/
+tmp/
 
 # Local caches / databases
 *.sqlite

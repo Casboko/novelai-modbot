@@ -350,6 +350,8 @@ class DslProgram:
             if not reasons:
                 reasons.append(rule.id)
             hits.append((compiled_rule, reasons))
+            if rule.stop:
+                break
 
         if not hits:
             return None
@@ -358,7 +360,7 @@ class DslProgram:
             compiled_rule, _ = item
             rule = compiled_rule.rule
             severity_rank = SEVERITY_ORDER.get(rule.severity, -1)
-            return (-severity_rank, rule.priority, compiled_rule.order)
+            return (-severity_rank, -(rule.priority or 0), compiled_rule.order)
 
         best_rule, best_reasons = sorted(hits, key=sort_key)[0]
         rule = best_rule.rule
@@ -377,6 +379,14 @@ class DslProgram:
     @property
     def group_patterns(self) -> Mapping[str, Sequence[str]]:
         return self._groups
+
+    @property
+    def compiled_features(self) -> tuple[CompiledFeature, ...]:
+        return self._features
+
+    @property
+    def compiled_rules(self) -> tuple[CompiledRule, ...]:
+        return self._rules
 
 
 def _compile_reason(template: str) -> ReasonTemplate:

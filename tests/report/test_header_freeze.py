@@ -39,7 +39,7 @@ def _sample_record() -> dict:
 
 def test_write_report_csv_header_freeze(tmp_path: Path) -> None:
     report_path = tmp_path / "report.csv"
-    rows = write_report_csv([_sample_record()], report_path, set())
+    rows = write_report_csv([_sample_record()], report_path, ())
     assert rows == 1
 
     with report_path.open("r", encoding="utf-8", newline="") as handle:
