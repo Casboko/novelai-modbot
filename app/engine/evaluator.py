@@ -15,6 +15,17 @@ from .dsl_runtime import build_context
 from .tag_norm import normalize_pair
 
 
+
+def _clip_unit_interval(value: float) -> float:
+    """Clamp the provided value into the inclusive range [0.0, 1.0]."""
+
+    if value <= 0.0:
+        return 0.0
+    if value >= 1.0:
+        return 1.0
+    return float(value)
+
+
 FEATURE_TO_EXPORT: Mapping[str, str] = {
     "nsfw_margin": "nsfw_margin",
     "nsfw_ratio": "nsfw_ratio",
@@ -104,12 +115,32 @@ class DslEvaluator:
 
         nudity = analysis.get("nudity_detections", []) or []
         nude_flags: list[str] = []
+        exposed_max = 0.0
+        exposed_prod = 1.0
         for det in nudity:
             if not isinstance(det, Mapping):
                 continue
             label = det.get("class")
-            if label:
-                nude_flags.append(str(label).upper())
+            if not label:
+                continue
+            canonical_label = str(label).upper()
+            nude_flags.append(canonical_label)
+
+            if "EXPOSED" not in canonical_label or "COVERED" in canonical_label:
+                continue
+
+            score_raw = det.get("score", 0.0)
+            try:
+                score = float(score_raw)
+            except (TypeError, ValueError):
+                continue
+            clipped = _clip_unit_interval(score)
+            if clipped > exposed_max:
+                exposed_max = clipped
+            exposed_prod *= 1.0 - clipped
+
+        metrics.setdefault("exposure_peak", _clip_unit_interval(exposed_max))
+        metrics.setdefault("exposure_score", _clip_unit_interval(1.0 - exposed_prod))
 
         return PreparedContext(
             rating=rating,
