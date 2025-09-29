@@ -10,14 +10,14 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Literal, Optional, Sequence
 
 from .engine.group_utils import group_top_tags
 from .engine.tag_norm import normalize_pair
 from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
-from .p3_stream import FindingsWriter, evaluate_stream
-from .rule_engine import RuleEngine
+from .p3_stream import FindingsWriter, evaluate_stream, _build_contract_payload
+from .rule_engine import EvaluationResult, RuleEngine
 from .triage_attachments import P0Index
 
 
@@ -99,10 +99,12 @@ def run_scan(
     dry_run: bool = False,
     metrics_path: Path | None = None,
     dsl_mode: str | None = None,
+    policy: DslPolicy | None = None,
     trace_jsonl: Path | None = None,
     limit: int = 0,
     offset: int = 0,
     engine: RuleEngine | None = None,
+    fallback: Literal["green", "skip"] | None = None,
     p0_path: Path | str | None = None,
     include_attachments: bool = True,
     drop_attachment_urls: bool = False,
@@ -118,8 +120,16 @@ def run_scan(
     findings_path = Path(findings_path)
     rules_path = Path(rules_path)
 
-    policy = DslPolicy.from_mode(dsl_mode) if dsl_mode else None
-    engine = engine or RuleEngine(str(rules_path), policy=policy)
+    effective_policy = policy
+    if engine is not None:
+        effective_policy = engine.policy
+    if effective_policy is None and dsl_mode:
+        effective_policy = DslPolicy.from_mode(dsl_mode)
+    if engine is None and fallback is None:
+        engine = RuleEngine(str(rules_path), policy=effective_policy)
+        effective_policy = engine.policy
+    if effective_policy is None:
+        effective_policy = DslPolicy()
 
     channel_set = set(channel_ids) if channel_ids else None
     severity_allowed = set(severity_filter) if severity_filter else None
@@ -133,7 +143,7 @@ def run_scan(
         analysis_path,
         limit=limit,
         offset=offset,
-        policy=engine.policy,
+        policy=effective_policy,
     )
 
     attachment_index: Optional[P0Index]
@@ -180,17 +190,28 @@ def run_scan(
 
     context = FindingsWriter(findings_path) if not dry_run else nullcontext(None)
     with context as writer:
-        report = evaluate_stream(
-            engine,
-            enriched_iter,
-            writer=writer,
-            dry_run=dry_run,
-            metrics_path=metrics_path,
-            record_filter=record_filter,
-            result_filter=result_filter,
-            collector=collector,
-            trace_path=trace_jsonl,
-        )
+        if fallback is None:
+            report = evaluate_stream(
+                engine,
+                enriched_iter,
+                writer=writer,
+                dry_run=dry_run,
+                metrics_path=metrics_path,
+                record_filter=record_filter,
+                result_filter=result_filter,
+                collector=collector,
+                trace_path=trace_jsonl,
+            )
+        else:
+            report = _run_legacy_fallback(
+                enriched_iter,
+                writer if not dry_run else None,
+                collector,
+                record_filter,
+                result_filter,
+                metrics_path,
+                fallback,
+            )
 
     if attachment_index is not None:
         logger.info(
@@ -212,6 +233,85 @@ def run_scan(
         output_path=findings_path,
         records=collector,
     )
+
+
+@dataclass(slots=True)
+class _FallbackReport:
+    total: int
+    severity_counts: Counter
+
+
+def _run_legacy_fallback(
+    records: Iterable[dict],
+    writer: FindingsWriter | None,
+    collector: list[dict],
+    record_filter: RecordFilter | None,
+    result_filter: ResultFilter | None,
+    metrics_path: Path | None,
+    fallback: Literal["green", "skip"],
+) -> _FallbackReport:
+    severity = Counter({"red": 0, "orange": 0, "yellow": 0, "green": 0})
+    produced = 0
+    processed = 0
+    fallback_reason = "legacy_ruleset_unsupported"
+
+    for record in records:
+        if record_filter and not record_filter(record):
+            continue
+        processed += 1
+        if fallback == "skip":
+            continue
+
+        result = EvaluationResult(
+            severity="green",
+            rule_id=None,
+            rule_title=None,
+            reasons=[fallback_reason],
+            metrics={
+                "winning": {
+                    "origin": "legacy",
+                    "severity": "green",
+                    "rule_id": None,
+                }
+            },
+        )
+        if result_filter and not result_filter(record, result):
+            continue
+
+        payload: Optional[dict]
+        if writer is not None:
+            payload, _ = writer.write(record, result, eval_ms=0.0)
+        else:
+            payload = _build_contract_payload(record, result)
+            payload.setdefault("metrics", {})["eval_ms"] = 0.0
+
+        severity["green"] += 1
+        produced += 1
+        if payload is not None:
+            collector.append(payload)
+
+    if metrics_path:
+        metrics_path = Path(metrics_path)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_snapshot = {
+            "total": produced,
+            "processed": processed,
+            "severity": dict(severity),
+            "fallback": {
+                "mode": fallback,
+                "reason": fallback_reason,
+            },
+        }
+        metrics_path.write_text(json.dumps(metrics_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    logger.warning(
+        "legacy_fallback applied mode=%s processed=%d produced=%d",
+        fallback,
+        processed,
+        produced,
+    )
+
+    return _FallbackReport(total=produced, severity_counts=severity)
 
 
 def _resolve_p0_scan_path(requested: Path | str | None) -> Optional[Path]:

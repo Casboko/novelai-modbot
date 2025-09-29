@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
-from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
+from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 
 SEVERITY_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
@@ -21,7 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-csv", type=Path, required=True, help="Path to write diff CSV")
     parser.add_argument("--sample-diff", type=int, default=0, help="Export top-N diffs as JSONL when >0")
     parser.add_argument("--export-dir", type=Path, default=Path("out/exports"), help="Directory for diff samples")
-    parser.add_argument("--dsl-mode", choices=["warn", "strict"], help="Overrides DSL policy mode")
+    parser.add_argument(
+        "--dsl-mode",
+        choices=["warn", "strict"],
+        help="Overrides DSL policy mode (CLI > ENV > YAML > warn)",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Limit number of records to evaluate")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N records")
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summaries")
@@ -156,9 +161,27 @@ def build_csv_row(record: dict, res_a, res_b) -> list:
 
 def main() -> None:
     args = parse_args()
-    policy = DslPolicy.from_mode(args.dsl_mode) if args.dsl_mode else None
-    engine_a = RuleEngine(str(args.rulesA), policy=policy)
-    engine_b = RuleEngine(str(args.rulesB), policy=policy)
+
+    policy_a, result_a, _ = resolve_policy(args.rulesA, args.dsl_mode)
+    if has_version_mismatch(result_a):
+        print("[error] rulesA is not version 2. Upgrade to DSL v2.", file=sys.stderr)
+        sys.exit(2)
+    if result_a.status == "error":
+        for issue in result_a.issues:
+            print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
+        sys.exit(1)
+
+    policy_b, result_b, _ = resolve_policy(args.rulesB, args.dsl_mode)
+    if has_version_mismatch(result_b):
+        print("[error] rulesB is not version 2. Upgrade to DSL v2.", file=sys.stderr)
+        sys.exit(2)
+    if result_b.status == "error":
+        for issue in result_b.issues:
+            print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
+        sys.exit(1)
+
+    engine_a = RuleEngine(str(args.rulesA), policy=policy_a)
+    engine_b = RuleEngine(str(args.rulesB), policy=policy_b)
     if args.print_config:
         print("[A]", engine_a.describe_config())
         print("[B]", engine_b.describe_config())

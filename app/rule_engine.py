@@ -40,6 +40,11 @@ class RuleEngine:
         self.policy = resolved_policy
         self.dsl_config: RuleConfigV2 = dsl_config
         self.raw_config = raw_config
+        version_raw = raw_config.get("version")
+        try:
+            self._rules_version: Optional[int] = int(version_raw)
+        except (TypeError, ValueError):
+            self._rules_version = None
 
         self._program = DslProgram.from_config(dsl_config, self.policy)
         self._evaluator = DslEvaluator(self._program)
@@ -56,11 +61,15 @@ class RuleEngine:
             pattern_map[canonical_name] = normalized
         self._group_patterns = pattern_map
 
-    def describe_config(self) -> str:
+    def describe_config(self, *, as_one_line: bool = False) -> str:
         groups = len(self._program.group_patterns)
         total_patterns = sum(len(items) for items in self._program.group_patterns.values())
         features = len(self._program.compiled_features)
         rules = len(self._program.compiled_rules)
+        if as_one_line:
+            version = self.rules_version
+            version_label = f"v{version}" if version is not None else "unknown"
+            return f"policy={self.policy.mode}, dsl=enabled (rules={version_label})"
         return (
             f"policy.mode={self.policy.mode}\n"
             f"dsl=enabled groups={groups} patterns={total_patterns} features={features} rules={rules}"
@@ -84,3 +93,7 @@ class RuleEngine:
     @property
     def groups(self) -> Dict[str, tuple[str, ...]]:
         return {name: tuple(tags) for name, tags in self._group_patterns.items()}
+
+    @property
+    def rules_version(self) -> Optional[int]:
+        return self._rules_version

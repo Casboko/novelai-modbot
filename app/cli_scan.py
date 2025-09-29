@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from .engine.types import DslPolicy
+from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 from .triage import run_scan
 
@@ -30,11 +31,27 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Filter severities (comma separated, e.g. red,orange)",
     )
-    parser.add_argument("--dsl-mode", choices=["warn", "strict"], help="Overrides DSL policy mode")
+    parser.add_argument(
+        "--dsl-mode",
+        choices=["warn", "strict"],
+        help="Overrides DSL policy mode (CLI > ENV > YAML > warn)",
+    )
     parser.add_argument("--metrics", type=Path, help="Path to write metrics JSON summary")
     parser.add_argument("--trace-jsonl", type=Path, help="Write per-record trace JSONL (optional)")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate without writing findings")
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summary")
+    parser.add_argument(
+        "--allow-legacy",
+        action="store_true",
+        help="Allow version 1 rules by enabling fallback handling",
+    )
+    parser.add_argument(
+        "--fallback",
+        choices=["green", "skip"],
+        default="green",
+        help="Fallback behaviour when legacy rules are allowed",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress startup banner output")
     parser.add_argument("--limit", type=int, default=0, help="Maximum records to evaluate")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N records before evaluation")
     parser.add_argument("--p0", type=Path, help="Path to p0 scan CSV for attachment metadata join")
@@ -57,10 +74,35 @@ def main() -> None:
     severity = None
     if args.severity and args.severity.lower() != "all":
         severity = [token.strip().lower() for token in args.severity.split(",") if token.strip()]
-    policy = DslPolicy.from_mode(args.dsl_mode) if args.dsl_mode else None
-    engine = RuleEngine(str(args.rules), policy=policy)
-    if args.print_config:
-        print(engine.describe_config())
+    policy, load_result, _ = resolve_policy(args.rules, args.dsl_mode)
+    if load_result.status == "error" and not has_version_mismatch(load_result):
+        for issue in load_result.issues:
+            print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
+        sys.exit(1)
+
+    is_legacy = has_version_mismatch(load_result)
+    if is_legacy and not args.allow_legacy:
+        for issue in load_result.issues:
+            if issue.code == "R2-V001" and issue.where == "version":
+                print(f"[error] {issue.msg}", file=sys.stderr)
+                break
+        print("Use --allow-legacy to continue with fallback handling.", file=sys.stderr)
+        sys.exit(2)
+
+    engine = None
+    if not is_legacy:
+        engine = RuleEngine(str(args.rules), policy=policy)
+        if args.print_config:
+            print(engine.describe_config())
+        if not args.quiet:
+            banner = engine.describe_config(as_one_line=True)
+            print(f"{banner}, source=CLI")
+    else:
+        if args.print_config:
+            print("policy.mode={mode}\nlegacy rules detected (version v1)".format(mode=policy.mode))
+        if not args.quiet:
+            print("policy={mode}, dsl=disabled (rules=v1), source=CLI".format(mode=policy.mode))
+
     summary = run_scan(
         args.analysis,
         args.findings,
@@ -75,6 +117,8 @@ def main() -> None:
         limit=args.limit,
         offset=args.offset,
         engine=engine,
+        policy=policy,
+        fallback=args.fallback if is_legacy else None,
         p0_path=args.p0,
         include_attachments=not args.no_attachments,
         drop_attachment_urls=args.drop_attachment_urls,

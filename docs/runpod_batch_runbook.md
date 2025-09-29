@@ -88,14 +88,16 @@ NUDENET_BATCH=16
 # 推奨プロファイル（任意）
 ANALYSIS_QPS=4.0
 ANALYSIS_CONCURRENCY=24
-DSL_MODE=warn
+# MODBOT_DSL_MODE=strict  # 環境変数で strict を指定したい場合のみ
 ```
 
 実行時は、環境変数を渡すか CLI 引数で明示します。
 
 ```bash
 python -m app.cli_wd14 ... --qps ${ANALYSIS_QPS:-4.0} --concurrency ${ANALYSIS_CONCURRENCY:-24}
-python -m app.cli_scan ... --dsl-mode ${DSL_MODE:-warn}
+python -m app.cli_scan ...
+
+strict で実行したい場合は `MODBOT_DSL_MODE=strict` を環境変数として渡すか、CLI に `--dsl-mode strict` を明示してください。
 ```
 
 ---
@@ -152,8 +154,9 @@ python -m app.cli_scan \
   --findings out/p3/p3_decision_all.jsonl \
   --rules configs/rules.yaml \
   --metrics out/metrics/p3_run.json \
-  --dsl-mode ${DSL_MODE:-warn} \
   --since 1970-01-01 --until 2099-12-31
+
+レガシー構成（`version: 1`）を一時的に続行する場合は `--allow-legacy --fallback green` を付与してください。結果は強制的に `severity=green` となり、CSV 契約は保たれます（書き込みを抑止したい場合は `--fallback skip`）。
 
 # 追加トレースを出力（必要なときだけ）
 python -m app.cli_scan \
@@ -161,15 +164,13 @@ python -m app.cli_scan \
   --findings out/p3/p3_decision_all.jsonl \
   --rules configs/rules.yaml \
   --metrics out/metrics/p3_run.json \
-  --trace-jsonl out/metrics/p3_trace.jsonl \
-  --dsl-mode ${DSL_MODE:-warn}
+  --trace-jsonl out/metrics/p3_trace.jsonl
 
 # ドライランで件数・速度確認
 python -m app.cli_scan \
   --analysis out/p2/p2_analysis_all.jsonl \
   --rules configs/rules.yaml \
   --metrics out/metrics/p3_dry.json \
-  --dsl-mode ${DSL_MODE:-warn} \
   --dry-run --limit 256 \
   --since 1970-01-01 --until 2099-12-31
 
@@ -181,8 +182,7 @@ python -m app.cli_rules_ab \
   --out-json out/metrics/p3_ab_compare.json \
   --out-csv  out/exports/p3_ab_diff.csv \
   --sample-diff 200 \
-  --export-dir out/exports \
-  --dsl-mode warn
+  --export-dir out/exports
 ```
 
 ---

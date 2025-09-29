@@ -11,6 +11,7 @@ from discord import app_commands
 
 from .config import get_settings
 from .discord_client import create_client
+from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
 from .store import Ticket, TicketStore
@@ -1605,6 +1606,21 @@ def register_commands(
         default_end_offset = timedelta()
         resolved_range = resolve_time_range(since, until, default_end_offset=default_end_offset)
 
+        policy, load_result, _ = resolve_policy(Path("configs/rules.yaml"), None)
+        if has_version_mismatch(load_result):
+            await interaction.followup.send(
+                "rules.yaml が version: 2 ではありません。設定を更新してください。",
+                ephemeral=True,
+            )
+            return
+        if load_result.status == "error":
+            message = "\n".join(f"[{issue.code}] {issue.where}: {issue.msg}" for issue in load_result.issues)
+            await interaction.followup.send(
+                "ルール読み込みに失敗しました:\n" + message,
+                ephemeral=True,
+            )
+            return
+
         try:
             summary = await asyncio.to_thread(
                 run_scan,
@@ -1617,6 +1633,7 @@ def register_commands(
                 severity_filter=severity_filter,
                 time_range=resolved_range,
                 default_end_offset=default_end_offset,
+                policy=policy,
             )
         except FileNotFoundError:
             await interaction.followup.send("解析データが見つかりません。Day2 の処理を先に実行してください。", ephemeral=True)

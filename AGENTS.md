@@ -92,7 +92,7 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
 - 利用可能な変数・関数
   - 変数: `rating.*`, `exposure_peak`, `minors_peak`, `channel.is_nsfw`, `message.is_spoiler`, `attachment_count` など（既存メトリクスは `metrics` 経由で DSL にバインド済み）。
   - 関数: `score(tag)`, `sum(group)`, `max(group)`, `any(group, gt=0.35)`, `count(group, gt=0.35)`, `clamp(x, lo, hi)`, `nude.has(flag)`, `nude.any(prefix="EXPOSED_", min=1)` など。
-- `app/engine/` 配下に Safe AST ベースの DSL ランタイムを実装済み。`DslProgram.evaluate()` の結果は `metrics.dsl` / `metrics.winning` に格納され、最終 `severity` は legacy と DSL の強度を比較して決定されます。
+- `app/engine/` 配下に Safe AST ベースの DSL ランタイムを実装済み。`DslProgram.evaluate()` の結果は `metrics.dsl` / `metrics.winning` に格納され、最終判定は DSL ベースで一貫します（legacy は `--allow-legacy` 併用時のフォールバックのみ）。
 - 厳格モードが必要な場合は `dsl_mode: strict` を `rules.yaml` に追加すると未知変数やゼロ除算で即エラーになります（既定は `warn` モードで 0/False にフォールバック）。
 - DSL の単体テストは `tests/engine/test_dsl_program.py` を参考に追加してください。主要ケース（命中、非命中、安全性と禁止ノード）を網羅することが推奨です。
 
@@ -103,8 +103,7 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
     --analysis out/p2/p2_analysis_all.jsonl \\
     --findings out/p3/findings.jsonl \\
     --rules configs/rules.yaml \\
-    --metrics out/metrics/p3_run.json \\
-    --dsl-mode warn
+    --metrics out/metrics/p3_run.json
   ```
 - ドライラン（結果を出さずメトリクスのみ確認）:
   ```bash
@@ -112,7 +111,7 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
     --analysis out/p2/p2_analysis_all.jsonl \\
     --rules configs/rules.yaml \\
     --metrics out/metrics/p3_dry.json \\
-    --dsl-mode warn --dry-run
+    --dry-run
   ```
 - `--print-config` で DSL グループ/ルール数を要約表示できます。`--limit` / `--offset` を使うとサンプリング実行が可能です。
 
@@ -127,8 +126,7 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
      --out-json out/metrics/p3_ab_compare.json \\
      --out-csv  out/exports/p3_ab_diff.csv \\
      --sample-diff 200 \\
-     --export-dir out/exports \\
-     --dsl-mode warn
+     --export-dir out/exports
    ```
 3. `p3_ab_compare.json` で counts/delta/混同行列、`p3_ab_diff.csv` で差分列、`p3_ab_diff_samples.jsonl` でレビュー用サンプルを確認
 4. 差分レビュー後、合意したルールを `configs/rules.yaml` に昇格
@@ -136,7 +134,9 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
 ## strict / warn モード
 - `warn`（既定）: 未知識別子や式エラーは 0/False にフォールバックし WARN を 1ルール×エラー種あたり最大5回表示
 - `strict`: ローダ/評価器のいずれかで例外化し、問題ルールを即時洗い出し
-- CLI 引数 `--dsl-mode` が YAML の `dsl_mode` より優先されます
+- モードの優先順位は **CLI `--dsl-mode` > ENV `MODBOT_DSL_MODE` > YAML `dsl_mode` > warn** です。
+- strict を常用したい場合は `MODBOT_DSL_MODE=strict` を環境変数に設定するか、CLI で `--dsl-mode strict` を指定してください。
+- レガシー構成（`version: 1`）が残っている場合は `--allow-legacy --fallback green` で強制的に `severity=green` として出力できます（もしくは `--fallback skip` で書き込みを抑止）。
 - WARN が多い場合は strict で健全性を確認してから本番に適用してください
 
 ## コミットとプルリクエスト

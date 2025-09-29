@@ -9,11 +9,13 @@
 
 ## モードの優先順位
 
-1. CLI `--mode`
-2. YAML の `dsl_mode`
-3. 既定値 `warn`
+1. CLI `--mode` / `--dsl-mode`
+2. ENV `MODBOT_DSL_MODE`
+3. YAML の `dsl_mode`
+4. 既定値 `warn`
 
 `LoadResult.mode` は優先順位適用後の値。
+環境変数による上書きは呼び出し側で `override_mode` として渡される前提です。
 
 ## バリデーション結果（LoadResult）
 
