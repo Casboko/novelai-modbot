@@ -99,6 +99,7 @@ def run_scan(
     dry_run: bool = False,
     metrics_path: Path | None = None,
     dsl_mode: str | None = None,
+    trace_jsonl: Path | None = None,
     limit: int = 0,
     offset: int = 0,
     engine: RuleEngine | None = None,
@@ -188,6 +189,7 @@ def run_scan(
             record_filter=record_filter,
             result_filter=result_filter,
             collector=collector,
+            trace_path=trace_jsonl,
         )
 
     if attachment_index is not None:

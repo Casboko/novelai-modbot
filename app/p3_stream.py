@@ -48,6 +48,7 @@ class MetricsReport:
     latency_ms_p95: float
     wall_time_s: float
     io_write_ms_total: float
+    throughput_rps: float
 
     def to_json(self) -> dict:
         return {
@@ -60,6 +61,7 @@ class MetricsReport:
             "latency_ms_p95": round(self.latency_ms_p95, 3),
             "wall_time_s": round(self.wall_time_s, 3),
             "io_write_ms_total": round(self.io_write_ms_total, 3),
+            "throughput_rps": round(self.throughput_rps, 3),
         }
 
 
@@ -98,6 +100,7 @@ class MetricsAggregator:
             for origin, count in self.winning.items()
         }
         winning_ratio.setdefault("dsl", winning_ratio.get("dsl", 0.0))
+        wall = max(wall_time_s, 1e-3)
         return MetricsReport(
             total=self.total,
             severity_counts=Counter(self.severity),
@@ -108,6 +111,7 @@ class MetricsAggregator:
             latency_ms_p95=p95,
             wall_time_s=wall_time_s,
             io_write_ms_total=self.io_write_ms_total,
+            throughput_rps=self.total / wall,
         )
 
 
@@ -119,8 +123,17 @@ class FindingsWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.path.open("w", encoding="utf-8")
 
-    def write(self, record: dict, result: EvaluationResult) -> tuple[dict, float]:
+    def write(
+        self,
+        record: dict,
+        result: EvaluationResult,
+        *,
+        eval_ms: float | None = None,
+    ) -> tuple[dict, float]:
         payload = _build_contract_payload(record, result)
+        if eval_ms is not None:
+            metrics = payload.setdefault("metrics", {})
+            metrics["eval_ms"] = round(float(eval_ms), 3)
         t0 = time.perf_counter()
         json.dump(payload, self._handle, ensure_ascii=False)
         self._handle.write("\n")
@@ -174,36 +187,68 @@ def evaluate_stream(
     result_filter: ResultFilter | None = None,
     collector: list[dict] | None = None,
     metrics_sample_capacity: int = 4096,
+    trace_path: Path | None = None,
 ) -> MetricsReport:
     start = time.perf_counter()
     metrics = MetricsAggregator(sample_capacity=metrics_sample_capacity)
     collected = collector if collector is not None else None
+    trace_handle = None
+    if trace_path:
+        trace_path = Path(trace_path)
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_handle = trace_path.open("w", encoding="utf-8")
 
-    for record in records:
-        if record_filter and not record_filter(record):
-            continue
-        t0 = time.perf_counter()
-        result = engine.evaluate(record)
-        latency_ms = (time.perf_counter() - t0) * 1e3
-        if result_filter and not result_filter(record, result):
-            continue
-        write_ms = 0.0
-        payload: Optional[dict] = None
-        if not dry_run:
-            if writer is None:
-                payload = _build_contract_payload(record, result)
+    try:
+        for record in records:
+            if record_filter and not record_filter(record):
+                continue
+            t0 = time.perf_counter()
+            result = engine.evaluate(record)
+            latency_ms = (time.perf_counter() - t0) * 1e3
+            if result_filter and not result_filter(record, result):
+                continue
+            rounded_latency = round(float(latency_ms), 3)
+            write_ms = 0.0
+            payload: Optional[dict] = None
+            if not dry_run:
+                if writer is None:
+                    payload = _build_contract_payload(record, result)
+                    payload.setdefault("metrics", {})["eval_ms"] = rounded_latency
+                else:
+                    payload, write_ms = writer.write(record, result, eval_ms=latency_ms)
             else:
-                payload, write_ms = writer.write(record, result)
-        elif collected is not None:
-            payload = _build_contract_payload(record, result)
+                payload = _build_contract_payload(record, result)
+                payload.setdefault("metrics", {})["eval_ms"] = rounded_latency
 
-        metrics.update(result, latency_ms=latency_ms, write_ms=write_ms)
-        if payload is not None and collected is not None:
-            collected.append(payload)
+            metrics.update(result, latency_ms=latency_ms, write_ms=write_ms)
+            if payload is not None and collected is not None:
+                collected.append(payload)
 
-    report = metrics.finalize(time.perf_counter() - start)
+            if trace_handle is not None:
+                winning_info = result.metrics.get("winning") if isinstance(result.metrics, dict) else None
+                winning_origin = "dsl"
+                if isinstance(winning_info, dict):
+                    winning_origin = str(winning_info.get("origin", winning_origin)) or "dsl"
+                trace_payload = {
+                    "phash": record.get("phash"),
+                    "severity": result.severity,
+                    "rule_id": result.rule_id,
+                    "winning": winning_origin,
+                    "eval_ms": rounded_latency,
+                }
+                json.dump(trace_payload, trace_handle, ensure_ascii=False)
+                trace_handle.write("\n")
+
+        report = metrics.finalize(time.perf_counter() - start)
+    finally:
+        if trace_handle is not None:
+            trace_handle.close()
+
     if metrics_path:
         metrics_path = Path(metrics_path)
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        metrics_path.write_text(json.dumps(report.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
+        metrics_path.write_text(
+            json.dumps(report.to_json(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return report

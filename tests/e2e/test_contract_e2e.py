@@ -69,7 +69,18 @@ def test_cli_contract_pipeline(tmp_path: Path) -> None:
     _write_analysis(analysis)
     _write_rules(rules)
 
-    run_scan(analysis, findings, rules, since="2000-01-01", until="2100-01-01")
+    metrics = tmp_path / "metrics.json"
+    trace = tmp_path / "trace.jsonl"
+
+    run_scan(
+        analysis,
+        findings,
+        rules,
+        since="2000-01-01",
+        until="2100-01-01",
+        metrics_path=metrics,
+        trace_jsonl=trace,
+    )
     generate_report(findings, report, rules_path=rules)
 
     schema_path = Path(__file__).resolve().parents[2] / "docs/contracts/p3_findings.schema.json"
@@ -85,3 +96,19 @@ def test_cli_contract_pipeline(tmp_path: Path) -> None:
     assert b"\r" not in findings_raw
     assert b"\r" not in report_raw
     assert "テストメッセージ" in findings.read_text(encoding="utf-8")
+
+    record = json.loads(findings.read_text(encoding="utf-8").splitlines()[0])
+    eval_ms = record.get("metrics", {}).get("eval_ms")
+    assert isinstance(eval_ms, (int, float))
+    assert eval_ms >= 0
+
+    metrics_data = json.loads(metrics.read_text(encoding="utf-8"))
+    assert "throughput_rps" in metrics_data
+    assert metrics_data["throughput_rps"] >= 0
+
+    trace_lines = trace.read_text(encoding="utf-8").splitlines()
+    finding_lines = findings.read_text(encoding="utf-8").splitlines()
+    assert len(trace_lines) == len(finding_lines)
+    trace_record = json.loads(trace_lines[0])
+    assert trace_record.get("eval_ms") == eval_ms
+    assert trace_record.get("winning") in {"dsl", "legacy"}

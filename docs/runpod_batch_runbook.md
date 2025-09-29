@@ -155,6 +155,15 @@ python -m app.cli_scan \
   --dsl-mode ${DSL_MODE:-warn} \
   --since 1970-01-01 --until 2099-12-31
 
+# 追加トレースを出力（必要なときだけ）
+python -m app.cli_scan \
+  --analysis out/p2/p2_analysis_all.jsonl \
+  --findings out/p3/p3_decision_all.jsonl \
+  --rules configs/rules.yaml \
+  --metrics out/metrics/p3_run.json \
+  --trace-jsonl out/metrics/p3_trace.jsonl \
+  --dsl-mode ${DSL_MODE:-warn}
+
 # ドライランで件数・速度確認
 python -m app.cli_scan \
   --analysis out/p2/p2_analysis_all.jsonl \
@@ -216,16 +225,13 @@ PY
 
 #### p3 メトリクスの補足
 
-`p3_run.json` には `winning` （legacy/dsl の生カウント）が含まれます。比率が欲しい場合は以下のように後処理してください。
+`p3_run.json` には `winning` の生カウントに加えて `winning_ratio` と `throughput_rps` が出力されます。`throughput_rps` は **フィルタ通過後に findings として書き出した件数 ÷ 実測ウォールタイム** で計算されるため、重いフィルタや `--limit` 指定時は実体感より小さく見える点に注意してください。走行時間の粗い把握や運用メトリクスのダッシュボード化では、この値を補助指標として扱うことを推奨します。
+
+また、findings の各レコードには `metrics.eval_ms`（評価処理1件あたりのレイテンシ、ミリ秒・小数第3位丸め）が追加されました。レビュー時は以下のように `jq` などで抜き出して比較できます。
 
 ```bash
-jq '.winning as $w | .winning_ratio = {
-      legacy: ($w.legacy / ($w.legacy + $w.dsl)),
-      dsl:    ($w.dsl / ($w.legacy + $w.dsl))
-    }' out/metrics/p3_run.json > out/metrics/p3_run.with_ratio.json
+jq -r '.metrics.eval_ms // empty' out/p3/p3_decision_all.jsonl | head
 ```
-
-> 将来的には `MetricsReport` に `winning_ratio` を追加することで自動化できます。
 
 ### 5.2 レビュー用成果物
 

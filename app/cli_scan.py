@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dsl-mode", choices=["warn", "strict"], help="Overrides DSL policy mode")
     parser.add_argument("--metrics", type=Path, help="Path to write metrics JSON summary")
+    parser.add_argument("--trace-jsonl", type=Path, help="Write per-record trace JSONL (optional)")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate without writing findings")
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summary")
     parser.add_argument("--limit", type=int, default=0, help="Maximum records to evaluate")
@@ -70,6 +71,7 @@ def main() -> None:
         severity_filter=severity,
         dry_run=args.dry_run,
         metrics_path=args.metrics,
+        trace_jsonl=args.trace_jsonl,
         limit=args.limit,
         offset=args.offset,
         engine=engine,
