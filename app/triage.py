@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import re
 from collections import Counter
 from contextlib import nullcontext
@@ -17,6 +18,7 @@ from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
 from .p3_stream import FindingsWriter, evaluate_stream
 from .rule_engine import RuleEngine
+from .triage_attachments import P0Index
 
 
 FINDINGS_PATH = Path("out/p3_findings.jsonl")
@@ -48,6 +50,9 @@ P3_CSV_HEADER: tuple[str, ...] = (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(slots=True)
 class ScanSummary:
     total: int
@@ -70,6 +75,16 @@ class ReportSummary:
     severity_filter: Optional[str]
 
 
+@dataclass(slots=True)
+class AttachmentStats:
+    index_rows: int = 0
+    records_with_index: int = 0
+    records_enriched: int = 0
+    attachments_added: int = 0
+    degraded_records: int = 0
+    source_path: Optional[Path] = None
+
+
 def run_scan(
     analysis_path: Path | str = ANALYSIS_PATH,
     findings_path: Path | str = FINDINGS_PATH,
@@ -87,6 +102,10 @@ def run_scan(
     limit: int = 0,
     offset: int = 0,
     engine: RuleEngine | None = None,
+    p0_path: Path | str | None = None,
+    include_attachments: bool = True,
+    drop_attachment_urls: bool = False,
+    attachments_report_path: Path | None = None,
 ) -> ScanSummary:
     """Evaluate analysis records and write findings adhering to the p3 contract.
 
@@ -116,6 +135,32 @@ def run_scan(
         policy=engine.policy,
     )
 
+    attachment_index: Optional[P0Index]
+    attachment_stats: AttachmentStats = AttachmentStats()
+    attachment_index = None
+    if include_attachments:
+        resolved_path = _resolve_p0_scan_path(p0_path)
+        if resolved_path:
+            try:
+                attachment_index = P0Index.from_csv(resolved_path)
+                attachment_stats.index_rows = attachment_index.total_rows
+                attachment_stats.source_path = resolved_path
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to load p0 index for attachments: %s", exc)
+        else:
+            logger.info("p0 scan csv not found; skipping attachment enrichment")
+
+    enriched_iter: Iterable[dict]
+    if attachment_index is None:
+        enriched_iter = analysis_iter
+    else:
+        enriched_iter = _enrich_records_with_attachments(
+            analysis_iter,
+            attachment_index,
+            attachment_stats,
+            drop_urls=drop_attachment_urls,
+        )
+
     def record_filter(record: dict) -> bool:
         if channel_set and record.get("channel_id") not in channel_set:
             return False
@@ -136,7 +181,7 @@ def run_scan(
     with context as writer:
         report = evaluate_stream(
             engine,
-            analysis_iter,
+            enriched_iter,
             writer=writer,
             dry_run=dry_run,
             metrics_path=metrics_path,
@@ -145,6 +190,20 @@ def run_scan(
             collector=collector,
         )
 
+    if attachment_index is not None:
+        logger.info(
+            "attachments_joined source=%s index_rows=%d records_with_index=%d records_enriched=%d added=%d degraded=%d",
+            attachment_stats.source_path,
+            attachment_stats.index_rows,
+            attachment_stats.records_with_index,
+            attachment_stats.records_enriched,
+            attachment_stats.attachments_added,
+            attachment_stats.degraded_records,
+        )
+
+    if attachments_report_path and collector:
+        _write_attachment_report(collector, attachments_report_path)
+
     return ScanSummary(
         total=report.total,
         severity_counts=report.severity_counts,
@@ -152,6 +211,160 @@ def run_scan(
         records=collector,
     )
 
+
+def _resolve_p0_scan_path(requested: Path | str | None) -> Optional[Path]:
+    candidates: list[Path] = []
+    if requested:
+        candidates.append(Path(requested))
+    else:
+        candidates.extend([Path("out/p0_scan.csv"), Path("out/out/p0_scan.csv")])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _enrich_records_with_attachments(
+    records: Iterable[dict],
+    index: P0Index,
+    stats: AttachmentStats,
+    *,
+    drop_urls: bool = False,
+) -> Iterator[dict]:
+    for record in records:
+        phash = record.get("phash")
+        attachments_by_msg = index.get(phash) if isinstance(phash, str) else {}
+        if attachments_by_msg:
+            stats.records_with_index += 1
+            added, degraded = _apply_attachments_to_record(record, attachments_by_msg, drop_urls=drop_urls)
+            stats.attachments_added += added
+            if added:
+                stats.records_enriched += 1
+            if degraded:
+                stats.degraded_records += 1
+        yield record
+
+
+def _apply_attachments_to_record(
+    record: dict,
+    attachments_by_msg: dict[str, tuple[dict[str, object], ...]],
+    *,
+    drop_urls: bool = False,
+) -> tuple[int, bool]:
+    messages_raw = record.get("messages")
+    messages = messages_raw if isinstance(messages_raw, list) else []
+    message_index: dict[str, dict] = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        msg_id = message.get("message_id")
+        if msg_id is None:
+            continue
+        message_index[str(msg_id)] = message
+
+    added = 0
+    unmatched: list[dict[str, object]] = []
+    seen_keys: set[tuple[str, object]] = set()
+
+    for msg_id, attachments in attachments_by_msg.items():
+        target_message = message_index.get(msg_id) if msg_id else None
+        if target_message is None and msg_id and str(msg_id) not in message_index:
+            unmatched.extend(attachments)
+            continue
+        destination = target_message.setdefault("attachments", []) if target_message else None
+        if destination is None:
+            unmatched.extend(attachments)
+            continue
+        existing_ids = {
+            item.get("id")
+            for item in destination
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        for attachment in attachments:
+            key = (msg_id, attachment.get("id"))
+            if key in seen_keys:
+                continue
+            copy = dict(attachment)
+            if drop_urls:
+                copy["url"] = None
+            if copy.get("id") in existing_ids:
+                continue
+            destination.append(copy)
+            seen_keys.add(key)
+            if copy.get("id") is not None:
+                existing_ids.add(copy["id"])
+            added += 1
+
+    degraded = False
+    if unmatched:
+        degraded = True
+        fallback_message: Optional[dict]
+        if messages:
+            fallback_message = messages[0]
+            fallback_attachments = fallback_message.setdefault("attachments", [])
+            fallback_existing = {
+                item.get("id")
+                for item in fallback_attachments
+                if isinstance(item, dict) and item.get("id") is not None
+            }
+            for attachment in unmatched:
+                key = ("", attachment.get("id"))
+                if key in seen_keys:
+                    continue
+                copy = dict(attachment)
+                if drop_urls:
+                    copy["url"] = None
+                if copy.get("id") in fallback_existing:
+                    continue
+                fallback_attachments.append(copy)
+                seen_keys.add(key)
+                if copy.get("id") is not None:
+                    fallback_existing.add(copy["id"])
+                added += 1
+        else:
+            fallback_message = None
+    return added, degraded
+
+
+def _write_attachment_report(records: Sequence[dict], path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "phash",
+        "severity",
+        "rule_id",
+        "message_link",
+        "attachments_count",
+        "first_attachment_id",
+        "first_attachment_filename",
+        "first_attachment_content_type",
+        "first_attachment_url",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            messages = record.get("messages") or []
+            attachments: list[dict] = []
+            for message in messages:
+                if isinstance(message, dict):
+                    attachments.extend(message.get("attachments") or [])
+            if not attachments:
+                continue
+            first = attachments[0]
+            writer.writerow(
+                {
+                    "phash": record.get("phash"),
+                    "severity": record.get("severity"),
+                    "rule_id": record.get("rule_id"),
+                    "message_link": record.get("message_link"),
+                    "attachments_count": len(attachments),
+                    "first_attachment_id": first.get("id"),
+                    "first_attachment_filename": first.get("filename"),
+                    "first_attachment_content_type": first.get("content_type"),
+                    "first_attachment_url": first.get("url"),
+                }
+            )
 
 def generate_report(
     findings_path: Path | str = FINDINGS_PATH,

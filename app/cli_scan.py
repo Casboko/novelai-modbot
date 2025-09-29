@@ -36,6 +36,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summary")
     parser.add_argument("--limit", type=int, default=0, help="Maximum records to evaluate")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N records before evaluation")
+    parser.add_argument("--p0", type=Path, help="Path to p0 scan CSV for attachment metadata join")
+    parser.add_argument("--no-attachments", action="store_true", help="Disable attachment enrichment")
+    parser.add_argument(
+        "--csv-attachments",
+        action="store_true",
+        help="Write extended CSV with attachment summary (p3_report_ext.csv)",
+    )
+    parser.add_argument(
+        "--drop-attachment-urls",
+        action="store_true",
+        help="Strip attachment URLs from findings output",
+    )
     return parser.parse_args()
 
 
@@ -61,6 +73,10 @@ def main() -> None:
         limit=args.limit,
         offset=args.offset,
         engine=engine,
+        p0_path=args.p0,
+        include_attachments=not args.no_attachments,
+        drop_attachment_urls=args.drop_attachment_urls,
+        attachments_report_path=(args.findings.with_name("p3_report_ext.csv") if args.csv_attachments else None),
     )
     if args.dry_run:
         print("[dry-run] findings not written")
