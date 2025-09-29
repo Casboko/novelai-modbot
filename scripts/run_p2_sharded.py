@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import glob
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,6 +132,14 @@ def prepare_tasks(args: argparse.Namespace) -> list[ShardTask]:
         )
     return tasks
 
+def _has_rules_config(tokens: Sequence[str] | None) -> bool:
+    if not tokens:
+        return False
+    for token in tokens:
+        if token == "--rules-config" or token.startswith("--rules-config="):
+            return True
+    return False
+
 
 async def execute_task(
     task: ShardTask,
@@ -192,8 +200,14 @@ async def execute_task(
         if args.batch_size:
             cmd.extend(["--batch-size", str(args.batch_size)])
 
-        if args.extra_args:
-            cmd.extend(args.extra_args)
+        extra_args = list(args.extra_args or [])
+        rules_cfg_path = Path("configs/rules.yaml")
+        if not _has_rules_config(extra_args):
+            cmd.extend(["--rules-config", str(rules_cfg_path)])
+            entry["rules_config"] = str(rules_cfg_path)
+            manifest.mark_dirty()
+        if extra_args:
+            cmd.extend(extra_args)
 
         process = await asyncio.create_subprocess_exec(*cmd)
         entry["pid"] = process.pid

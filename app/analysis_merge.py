@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 import json
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -16,23 +17,13 @@ import random
 import yaml
 
 from .engine.tag_norm import normalize_pair, normalize_tag
+from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .analyzer_nudenet import NudeNetAnalyzer
 from .batch_loader import ImageRequest, load_images
 from .cache_nudenet import CacheKey as NudeCacheKey, NudeNetCache
 from .calibration import apply_wd14_calibration, load_calibration
 from .schema import MessageRef, NudityDetection, parse_bool
 
-
-NSFW_GENERAL_TAGS_DEFAULT = {
-    "bikini",
-    "lingerie",
-    "underwear",
-    "panties",
-    "bra",
-    "swimsuit",
-    "swimwear",
-    "naked",
-}
 
 STRONG_KEYWORDS = (
     "BREAST_EXPOSED",
@@ -179,7 +170,7 @@ def compute_placement_risk(
     exposure_weight = float(cfg.get("exposure_weight", 0.7))
     topk = int(cfg.get("topk", 3))
     nsfw_tags: set[str] = set()
-    for item in cfg.get("nsfw_tags", NSFW_GENERAL_TAGS_DEFAULT):
+    for item in cfg.get("nsfw_tags", []):
         if not isinstance(item, str):
             continue
         canonical = normalize_tag(item)
@@ -218,8 +209,10 @@ async def async_main() -> None:
     xsignals_cfg = load_yaml(args.xsignals_config)
     try:
         rules_cfg = load_yaml(args.rules_config)
+        rules_loaded = True
     except FileNotFoundError:
-        rules_cfg = {}
+        rules_cfg = None
+        rules_loaded = False
 
     overlay_thresholds = nudenet_cfg.get("thresholds", {})
     keep_topk = int(nudenet_cfg.get("keep_topk", 10))
@@ -231,27 +224,31 @@ async def async_main() -> None:
     analyzer = NudeNetAnalyzer()
     cache = NudeNetCache(args.nudenet_cache)
 
-    nsfw_tags_raw = rules_cfg.get("nsfw_general_tags", []) or []
-    nsfw_tags = set()
-    for tag in nsfw_tags_raw:
-        if not isinstance(tag, str):
-            continue
-        canonical = normalize_tag(tag)
-        if canonical:
-            nsfw_tags.add(canonical)
     placement_cfg = dict(placement_cfg)
-    if nsfw_tags:
-        placement_cfg["nsfw_tags"] = sorted(nsfw_tags)
-    else:
-        fallback_tags = placement_cfg.get("nsfw_tags", NSFW_GENERAL_TAGS_DEFAULT)
-        nsfw_tags = set()
-        for tag in fallback_tags:
-            if not isinstance(tag, str):
+
+    def _normalize_list(values: Iterable[object]) -> list[str]:
+        canonical: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
                 continue
-            canonical = normalize_tag(tag)
-            if canonical:
-                nsfw_tags.add(canonical)
-        placement_cfg["nsfw_tags"] = sorted(nsfw_tags)
+            tag = normalize_tag(value)
+            if tag:
+                canonical.add(tag)
+        return sorted(canonical)
+
+    nsfw_tags_list: list[str] = []
+    if rules_loaded:
+        try:
+            nsfw_tags_list = extract_nsfw_general_tags(rules_cfg, strict=True)
+        except RulesDictError as exc:
+            print(f"[analysis_merge] {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        placement_cfg["nsfw_tags"] = nsfw_tags_list
+    else:
+        fallback = _normalize_list(placement_cfg.get("nsfw_tags", []))
+        placement_cfg["nsfw_tags"] = fallback
+
+    nsfw_tags = set(placement_cfg.get("nsfw_tags", []))
 
     calib = load_calibration(Path("configs/calibration_wd14.json"))
 

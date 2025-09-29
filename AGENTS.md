@@ -15,6 +15,7 @@
 - `python -m app.cli_scan --analysis out/p2_analysis.jsonl --findings out/p3_findings.jsonl` : ルール評価を行いサマリーを表示します。
 - `python -m app.cli_report --findings out/p3_findings.jsonl --severity red` : CSV レポートを作成し、重大度フィルタ付きでエクスポートします。
 - `python -m app.cli_report --help` や `python -m app.cli_scan --help` を実行し、追加オプションやチャンネルフィルタを確認してください。
+- NSFW 辞書は `configs/rules.yaml` の `groups.nsfw_general` を唯一の編集箇所とし、更新後は **p1（必要な場合）→p2→p3** の順に再実行して反映を確認してください。
 
 ## GPU 実行クイックスタート（WD14）
 - 依存導入は必ずどちらか一方のみを選択します。
@@ -51,6 +52,7 @@
      --status-file out/status/p2_manifest.json \
      --extra-args "--nudenet-mode auto"
    ```
+   - ランナーは `--rules-config configs/rules.yaml` を自動付与します。別の辞書を使う場合は `--extra-args` で明示してください。
 4. **マージ（任意）**:
    ```bash
    python scripts/merge_jsonl.py --glob "out/p1/p1_wd14_*.jsonl" --out out/p1/p1_wd14_all.jsonl

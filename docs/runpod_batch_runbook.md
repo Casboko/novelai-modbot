@@ -13,6 +13,7 @@
   - Network Volume は Pod のライフサイクルと独立に永続し、複数 Pod で共有できます。デフォルトマウントは `/workspace` です。[^runpod-nv]
   - Network Volume は Runpod S3互換 API で直接読み書きできます（Pod `/workspace/path` ⇄ `s3://<VOLUME_ID>/path` が 1:1 対応）。[^runpod-s3]
 - **I/O レート制御**: Discord は **グローバル 50 rps** のレート上限があります。必ず QPS を抑制し、429 レスポンス時は `Retry-After` を尊重してください。[^discord-rate]
+- **NSFW辞書の一次ソース**: `configs/rules.yaml` の `groups.nsfw_general` を編集し、反映が必要な場合は必ず **p1（必要なら）→p2→p3** の順で再実行してください。`rules.yaml` が見つからないときのみ `configs/xsignals.yaml` へフォールバックします。
 - **GPU 推論**: ONNX Runtime の Execution Provider は `['CUDAExecutionProvider', 'CPUExecutionProvider']` を最低ラインに、環境が対応していれば `TensorrtExecutionProvider` を優先してください。[^onnx-ep]
 
 ---
@@ -144,6 +145,8 @@ python scripts/run_p2_sharded.py \
   --status-file out/status/p2_manifest.json \
   --extra-args "--nudenet-mode auto"
 ```
+
+- ランナーは `--rules-config configs/rules.yaml` を自動付与します。別パスを使う場合は `--extra-args` に明示して上書きしてください。
 
 ### 4.4 p3（判定 / DSL 併用）
 

@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
 from .batch_loader import ImageLoadResult, ImageRequest, load_images
 from .cache_wd14 import CacheKey, WD14Cache
 from .config import get_settings
-from .engine.tag_norm import normalize_tag
+from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
 
 
@@ -46,17 +47,12 @@ def load_rules_nsfw_tags(path: Path) -> set[str]:
         return set()
     if not isinstance(data, dict):
         return set()
-    tags = data.get("nsfw_general_tags", [])
-    if not isinstance(tags, list):
-        return set()
-    result: set[str] = set()
-    for tag in tags:
-        if not isinstance(tag, str):
-            continue
-        canonical = normalize_tag(tag)
-        if canonical:
-            result.add(canonical)
-    return result
+    try:
+        tags = extract_nsfw_general_tags(data, strict=True)
+    except RulesDictError as exc:
+        print(f"[cli_wd14] {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    return set(tags)
 
 
 def parse_args() -> argparse.Namespace:
