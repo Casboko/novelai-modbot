@@ -111,4 +111,4 @@ def test_cli_contract_pipeline(tmp_path: Path) -> None:
     assert len(trace_lines) == len(finding_lines)
     trace_record = json.loads(trace_lines[0])
     assert trace_record.get("eval_ms") == eval_ms
-    assert trace_record.get("winning") in {"dsl", "legacy"}
+    assert trace_record.get("winning") == "dsl"

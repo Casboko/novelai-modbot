@@ -1,0 +1,19 @@
+version: 2
+rule_titles:
+  TEST: "Mismatch"
+
+groups:
+  nsfw_general:
+    - bikini
+
+nsfw_general_tags:
+  - lingerie
+
+features: {}
+
+rules:
+  - id: TEST
+    severity: red
+    when: "rating.explicit >= 0.5"
+    reasons:
+      - "exp={rating.explicit:.2f}"

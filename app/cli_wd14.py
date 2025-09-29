@@ -22,7 +22,6 @@ load_dotenv()
 from .analyzer_wd14 import WD14Analyzer, WD14Prediction, WD14Session
 from .batch_loader import ImageLoadResult, ImageRequest, load_images
 from .cache_wd14 import CacheKey, WD14Cache
-from .config import get_settings
 from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
 

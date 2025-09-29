@@ -60,6 +60,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--batch-size", type=int, help="Overrides NudeNet batch size")
+    parser.add_argument(
+        "--buffered",
+        action="store_true",
+        help="Buffer all analysis records before writing output (compatibility mode)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed for deterministic operations (e.g. latency sampling)",
+    )
     return parser.parse_args()
 
 
@@ -203,6 +214,7 @@ def _matches_keyword(label: str, keywords: Iterable[str]) -> bool:
 
 async def async_main() -> None:
     args = parse_args()
+    random.seed(args.seed)
     scan_entries = load_scan_metadata(args.scan, args.limit)
     wd14_entries = load_wd14(args.wd14, args.limit)
     nudenet_cfg = load_yaml(args.nudenet_config)
@@ -259,7 +271,15 @@ async def async_main() -> None:
     total_latency_ms = 0.0
     processed = 0
 
+    total_records = 0
     records: list[dict] = []
+    out_handle = None
+
+    if args.buffered:
+        records = []
+    else:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        out_handle = args.out.open("w", encoding="utf-8")
 
     missing: list[str] = []
     cached_payloads: dict[str, dict] = {}
@@ -373,100 +393,110 @@ async def async_main() -> None:
     for i in range(0, len(missing), batch_size):
         await process_batch(missing[i : i + batch_size])
 
-    for phash in phashes:
-        scan_entry = scan_entries[phash]
-        wd14_entry = wd14_entries[phash]
-        primary, messages = summarize_messages(scan_entry["rows"])
+    try:
+        for phash in phashes:
+            scan_entry = scan_entries[phash]
+            wd14_entry = wd14_entries[phash]
+            primary, messages = summarize_messages(scan_entry["rows"])
 
-        wd14_payload = wd14_entry.get("wd14", {})
-        wd14_payload = apply_wd14_calibration(wd14_payload, calib)
-        nudity_payload = cached_payloads.get(phash, {"detections": []})
-        raw_detections = [
-            NudityDetection(
-                cls=item.get("class", ""),
-                score=float(item.get("score", 0.0)),
-                box=item.get("box"),
-            )
-            for item in nudity_payload.get("detections", [])
-        ]
-        reduced_detections = keep_topk_detections(raw_detections, keep_topk)
-        exposure_score = compute_exposure_score(reduced_detections, overlay_thresholds, exposure_weights)
-        placement_risk = compute_placement_risk(wd14_payload, exposure_score, placement_cfg)
+            wd14_payload = wd14_entry.get("wd14", {})
+            wd14_payload = apply_wd14_calibration(wd14_payload, calib)
+            nudity_payload = cached_payloads.get(phash, {"detections": []})
+            raw_detections = [
+                NudityDetection(
+                    cls=item.get("class", ""),
+                    score=float(item.get("score", 0.0)),
+                    box=item.get("box"),
+                )
+                for item in nudity_payload.get("detections", [])
+            ]
+            reduced_detections = keep_topk_detections(raw_detections, keep_topk)
+            exposure_score = compute_exposure_score(reduced_detections, overlay_thresholds, exposure_weights)
+            placement_risk = compute_placement_risk(wd14_payload, exposure_score, placement_cfg)
 
-        rating = wd14_payload.get("rating", {})
-        general_map: dict[str, float] = {}
-        source_tags = wd14_payload.get("general_raw") or wd14_payload.get("general", []) or []
-        for item in source_tags:
-            pair = normalize_pair(item)
-            if pair is None:
-                continue
-            tag, score = pair
-            existing = general_map.get(tag)
-            if existing is None or score > existing:
-                general_map[tag] = score
-        general_rating = float(rating.get("general", 0.0))
-        sensitive_rating = float(rating.get("sensitive", 0.0))
-        questionable = float(rating.get("questionable", 0.0))
-        explicit = float(rating.get("explicit", 0.0))
-        rating_total = general_rating + sensitive_rating + questionable + explicit + 1e-6
-        nsfw_margin = max(questionable, explicit) - max(general_rating, sensitive_rating)
-        nsfw_ratio = (questionable + explicit) / rating_total
-        nsfw_general_sum = sum(float(general_map.get(tag, 0.0)) for tag in nsfw_tags)
+            rating = wd14_payload.get("rating", {})
+            general_map: dict[str, float] = {}
+            source_tags = wd14_payload.get("general_raw") or wd14_payload.get("general", []) or []
+            for item in source_tags:
+                pair = normalize_pair(item)
+                if pair is None:
+                    continue
+                tag, score = pair
+                existing = general_map.get(tag)
+                if existing is None or score > existing:
+                    general_map[tag] = score
+            general_rating = float(rating.get("general", 0.0))
+            sensitive_rating = float(rating.get("sensitive", 0.0))
+            questionable = float(rating.get("questionable", 0.0))
+            explicit = float(rating.get("explicit", 0.0))
+            rating_total = general_rating + sensitive_rating + questionable + explicit + 1e-6
+            nsfw_margin = max(questionable, explicit) - max(general_rating, sensitive_rating)
+            nsfw_ratio = (questionable + explicit) / rating_total
+            nsfw_general_sum = sum(float(general_map.get(tag, 0.0)) for tag in nsfw_tags)
 
-        record = {
-            "phash": phash,
-            "guild_id": primary.guild_id,
-            "channel_id": primary.channel_id,
-            "message_id": primary.message_id,
-            "message_link": primary.message_link,
-            "created_at": primary.created_at,
-            "author_id": primary.author_id,
-            "source": primary.source,
-            "is_nsfw_channel": primary.is_nsfw_channel,
-            "messages": [
-                {
-                    "message_link": msg.message_link,
-                    "message_id": msg.message_id,
-                    "channel_id": msg.channel_id,
-                    "guild_id": msg.guild_id,
-                    "source": msg.source,
-                    "url": msg.url,
-                    "author_id": msg.author_id,
-                    "is_nsfw_channel": msg.is_nsfw_channel,
-                }
-                for msg in messages
-            ],
-            "wd14": wd14_payload,
-            "nudity_detections": [
-                {
-                    "class": det.cls,
-                    "score": det.score,
-                    "box": det.box,
-                }
-                for det in reduced_detections
-            ],
-            "xsignals": {
-                "exposure_score": exposure_score,
-                "placement_risk_pre": placement_risk,
-                "nsfw_margin": nsfw_margin,
-                "nsfw_ratio": nsfw_ratio,
-                "nsfw_general_sum": nsfw_general_sum,
-            },
-            "meta": {
-                "nudenet_version": analyzer.version,
-                "wd_model": wd14_payload.get("model"),
-                "wd_revision": wd14_payload.get("revision"),
-                "wd_input_size": wd14_payload.get("input_size"),
-                "nudenet_error": failures.get(phash),
-            },
-        }
-        records.append(record)
+            record = {
+                "phash": phash,
+                "guild_id": primary.guild_id,
+                "channel_id": primary.channel_id,
+                "message_id": primary.message_id,
+                "message_link": primary.message_link,
+                "created_at": primary.created_at,
+                "author_id": primary.author_id,
+                "source": primary.source,
+                "is_nsfw_channel": primary.is_nsfw_channel,
+                "messages": [
+                    {
+                        "message_link": msg.message_link,
+                        "message_id": msg.message_id,
+                        "channel_id": msg.channel_id,
+                        "guild_id": msg.guild_id,
+                        "source": msg.source,
+                        "url": msg.url,
+                        "author_id": msg.author_id,
+                        "is_nsfw_channel": msg.is_nsfw_channel,
+                    }
+                    for msg in messages
+                ],
+                "wd14": wd14_payload,
+                "nudity_detections": [
+                    {
+                        "class": det.cls,
+                        "score": det.score,
+                        "box": det.box,
+                    }
+                    for det in reduced_detections
+                ],
+                "xsignals": {
+                    "exposure_score": exposure_score,
+                    "placement_risk_pre": placement_risk,
+                    "nsfw_margin": nsfw_margin,
+                    "nsfw_ratio": nsfw_ratio,
+                    "nsfw_general_sum": nsfw_general_sum,
+                },
+                "meta": {
+                    "nudenet_version": analyzer.version,
+                    "wd_model": wd14_payload.get("model"),
+                    "wd_revision": wd14_payload.get("revision"),
+                    "wd_input_size": wd14_payload.get("input_size"),
+                    "nudenet_error": failures.get(phash),
+                },
+            }
+            if args.buffered:
+                records.append(record)
+            else:
+                json.dump(record, out_handle, ensure_ascii=False)
+                out_handle.write("\n")
+            total_records += 1
+    finally:
+        if out_handle is not None:
+            out_handle.close()
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as fp:
-        for record in records:
-            json.dump(record, fp, ensure_ascii=False)
-            fp.write("\n")
+    if args.buffered:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with args.out.open("w", encoding="utf-8") as fp:
+            for record in records:
+                json.dump(record, fp, ensure_ascii=False)
+                fp.write("\n")
 
     if processed:
         avg_latency = total_latency_ms / processed
@@ -482,7 +512,7 @@ async def async_main() -> None:
 
     metrics = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total_records": len(records),
+        "total_records": total_records,
         "from_cache": cache_hits,
         "nudity_failures": failures,
         "nudenet_version": analyzer.version,

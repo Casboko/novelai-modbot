@@ -1,0 +1,16 @@
+[run]
+source = app
+omit =
+    app/main.py
+    app/notifier.py
+    app/discord_client.py
+    app/crawler.py
+    app/p0_scan.py
+    app/cli_*.py
+
+[report]
+fail_under = 65
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError

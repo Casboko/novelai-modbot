@@ -1,0 +1,22 @@
+version: 2
+dsl_mode: warn
+rule_titles:
+  TEST-ORANGE: "Test Orange"
+
+groups:
+  nsfw_general:
+    - bikini
+    - "see through"
+    - topless
+
+features:
+  exposure_gate: "exposure_peak"
+
+rules:
+  - id: TEST-ORANGE
+    severity: orange
+    priority: 5
+    when: "(!channel.is_nsfw) && (exposure_gate >= 0.30 || sum('nsfw_general') >= 0.50)"
+    reasons:
+      - "exp={exposure_gate:.2f}"
+      - "sum={sum('nsfw_general'):.2f}"

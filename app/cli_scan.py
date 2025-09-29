@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         choices=["warn", "strict"],
         help="Overrides DSL policy mode (CLI > ENV > YAML > warn)",
     )
+    parser.add_argument(
+        "--lock-mode",
+        choices=["warn", "strict"],
+        help="Force both loader and evaluator to use the specified DSL mode",
+    )
     parser.add_argument("--metrics", type=Path, help="Path to write metrics JSON summary")
     parser.add_argument("--trace-jsonl", type=Path, help="Write per-record trace JSONL (optional)")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate without writing findings")
@@ -74,7 +79,8 @@ def main() -> None:
     severity = None
     if args.severity and args.severity.lower() != "all":
         severity = [token.strip().lower() for token in args.severity.split(",") if token.strip()]
-    policy, load_result, _ = resolve_policy(args.rules, args.dsl_mode)
+    override_mode = args.lock_mode or args.dsl_mode
+    policy, load_result, _ = resolve_policy(args.rules, override_mode)
     if load_result.status == "error" and not has_version_mismatch(load_result):
         for issue in load_result.issues:
             print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
