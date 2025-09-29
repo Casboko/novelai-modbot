@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from .io.stream import iter_jsonl
@@ -11,6 +13,9 @@ from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 
 SEVERITY_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
+URL_RE = re.compile(r"(?i)\bhttps?://[^\s<>\(\)\"']+")
+MAX_REASON_ITEMS = 3
+MAX_REASON_LENGTH = 80
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,19 +23,164 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis", type=Path, required=True, help="Analysis JSONL file or directory")
     parser.add_argument("--rulesA", type=Path, required=True, help="Rules configuration for variant A")
     parser.add_argument("--rulesB", type=Path, required=True, help="Rules configuration for variant B")
-    parser.add_argument("--out-json", type=Path, required=True, help="Path to write summary JSON")
-    parser.add_argument("--out-csv", type=Path, required=True, help="Path to write diff CSV")
+    parser.add_argument("--out-json", type=Path, help="Path to write summary JSON")
+    parser.add_argument("--out-csv", type=Path, help="Path to write diff CSV")
     parser.add_argument("--sample-diff", type=int, default=0, help="Export top-N diffs as JSONL when >0")
-    parser.add_argument("--export-dir", type=Path, default=Path("out/exports"), help="Directory for diff samples")
+    parser.add_argument("--export-dir", type=Path, help="Directory for diff samples")
+    parser.add_argument("--out-dir", type=Path, help="Directory to write compare/diff outputs")
     parser.add_argument(
         "--dsl-mode",
         choices=["warn", "strict"],
         help="Overrides DSL policy mode (CLI > ENV > YAML > warn)",
     )
+    parser.add_argument(
+        "--lock-mode",
+        choices=["warn", "strict"],
+        help="Lock both A/B evaluations to the specified mode (overrides CLI/ENV/YAML)",
+    )
+    parser.add_argument("--allow-legacy", action="store_true", help="Skip comparison when legacy rules are detected")
+    parser.add_argument(
+        "--samples-minimal",
+        action="store_true",
+        help="Write minimal JSONL samples instead of full analysis records",
+    )
+    parser.add_argument(
+        "--samples-redact-urls",
+        action="store_true",
+        help="Redact URLs in exported samples (message_link/url -> null, inline URLs -> [URL])",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Limit number of records to evaluate")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N records")
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summaries")
     return parser.parse_args()
+
+
+def _yaml_declared_mode(result) -> str | None:
+    config = getattr(result, "config", None)
+    raw = getattr(config, "raw", None)
+    if isinstance(raw, dict):
+        value = raw.get("dsl_mode")
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"warn", "strict"}:
+                return normalized
+    return None
+
+
+def _mode_source(lock_mode: str | None, cli_mode: str | None, env_mode: str | None, result) -> str:
+    if lock_mode:
+        return "lock-mode"
+    if cli_mode:
+        return "CLI"
+    if env_mode:
+        return "ENV"
+    if _yaml_declared_mode(result):
+        return "YAML"
+    return "default"
+
+
+def _redact_urls_in_text(value: str) -> str:
+    if "[URL]" in value:
+        return value
+    return URL_RE.sub("[URL]", value)
+
+
+def _trim_reason(value: str) -> str:
+    text = value.strip()
+    if len(text) <= MAX_REASON_LENGTH:
+        return text
+    trimmed = text[: MAX_REASON_LENGTH - 3].rstrip()
+    return f"{trimmed}..."
+
+
+def _prepare_reasons(candidate, *, redact_urls: bool) -> list[str]:
+    if not isinstance(candidate, (list, tuple)):
+        return []
+    results: list[str] = []
+    for item in candidate:
+        if not isinstance(item, str):
+            continue
+        text = item
+        if redact_urls:
+            text = _redact_urls_in_text(text)
+        text = _trim_reason(text)
+        if text:
+            results.append(text)
+        if len(results) >= MAX_REASON_ITEMS:
+            break
+    return results
+
+
+def _coerce_float(value: object) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_minimal_sample(payload: dict, *, redact_urls: bool) -> dict:
+    _ = redact_urls  # minimal view is always redacted; argument retained for compatibility
+    record = payload.get("record") if isinstance(payload, dict) else None
+    record_map = record if isinstance(record, dict) else {}
+    phash = record_map.get("phash") or record_map.get("phash_hex")
+
+    wd14 = record_map.get("wd14") if isinstance(record_map.get("wd14"), dict) else {}
+    rating = wd14.get("rating", {}) if isinstance(wd14, dict) else {}
+    xsignals = record_map.get("xsignals") if isinstance(record_map.get("xsignals"), dict) else {}
+
+    rating_explicit = _coerce_float(rating.get("explicit", 0.0))
+    rating_questionable = _coerce_float(rating.get("questionable", 0.0))
+
+    metrics_base = {
+        "rating_explicit": rating_explicit,
+        "rating_questionable": rating_questionable,
+    }
+    metrics_optional: dict[str, float] = {}
+    for key in ("exposure_score", "nsfw_general_sum"):
+        if isinstance(xsignals, dict) and key in xsignals:
+            metrics_optional[key] = _coerce_float(xsignals.get(key))
+
+    metrics_a = dict(metrics_base)
+    metrics_a.update(metrics_optional)
+    metrics_b = dict(metrics_base)
+    metrics_b.update(metrics_optional)
+
+    severity = payload.get("severity") if isinstance(payload, dict) else {}
+    rules = payload.get("rule") if isinstance(payload, dict) else {}
+    reasons = payload.get("reasons") if isinstance(payload, dict) else {}
+
+    minimal = {
+        "message_link": None,
+        "phash": phash if phash else None,
+        "severityA": severity.get("A"),
+        "severityB": severity.get("B"),
+        "ruleA": rules.get("A"),
+        "ruleB": rules.get("B"),
+        "reasonsA": _prepare_reasons(reasons.get("A"), redact_urls=True),
+        "reasonsB": _prepare_reasons(reasons.get("B"), redact_urls=True),
+        "metricsA": metrics_a,
+        "metricsB": metrics_b,
+    }
+    return minimal
+
+
+def _redact_payload(payload: dict) -> dict:
+    def _walk(value):
+        if isinstance(value, dict):
+            result: dict = {}
+            for key, item in value.items():
+                if key == "message_link" or key.lower() == "url" or key.lower().endswith("_url"):
+                    result[key] = None
+                else:
+                    result[key] = _walk(item)
+            return result
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        if isinstance(value, str):
+            return _redact_urls_in_text(value)
+        return value
+
+    return _walk(deepcopy(payload))
 
 
 class AbSummary:
@@ -100,16 +250,22 @@ class TopNSampler:
             return
         heapq.heapreplace(self._entries, entry)
 
-    def export(self, path: Path) -> None:
+    def export(self, path: Path, *, minimal: bool = False, redact_urls: bool = False) -> None:
         if self.capacity <= 0 or not self._entries:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         records = sorted(self._entries, key=lambda item: (-item[0], item[1]))
         with path.open("w", encoding="utf-8") as handle:
             for score, _, payload in records:
-                payload = dict(payload)
-                payload["score"] = score
-                handle.write(json.dumps(payload, ensure_ascii=False))
+                if minimal:
+                    entry = _build_minimal_sample(payload, redact_urls=redact_urls)
+                elif redact_urls:
+                    entry = _redact_payload(payload)
+                else:
+                    entry = dict(payload)
+                output = dict(entry)
+                output["score"] = score
+                handle.write(json.dumps(output, ensure_ascii=False))
                 handle.write("\n")
 
 
@@ -162,35 +318,93 @@ def build_csv_row(record: dict, res_a, res_b) -> list:
 def main() -> None:
     args = parse_args()
 
-    policy_a, result_a, _ = resolve_policy(args.rulesA, args.dsl_mode)
+    out_json_path = args.out_json
+    out_csv_path = args.out_csv
+    export_dir = args.export_dir
+    if args.out_dir:
+        base = args.out_dir
+        if out_json_path is None:
+            out_json_path = base / "p3_ab_compare.json"
+        if out_csv_path is None:
+            out_csv_path = base / "p3_ab_diff.csv"
+        if export_dir is None:
+            export_dir = base
+
+    if out_json_path is None or out_csv_path is None:
+        print("[error] --out-json/--out-csv を指定するか --out-dir で出力先をまとめて指定してください。", file=sys.stderr)
+        sys.exit(1)
+
+    if export_dir is None:
+        export_dir = Path("out/exports")
+
+    override_mode = args.lock_mode or args.dsl_mode
+
+    policy_a, result_a, env_a = resolve_policy(args.rulesA, override_mode)
     if has_version_mismatch(result_a):
-        print("[error] rulesA is not version 2. Upgrade to DSL v2.", file=sys.stderr)
-        sys.exit(2)
+        if not args.allow_legacy:
+            print("[error] rulesA is not version 2. Upgrade to DSL v2.", file=sys.stderr)
+            print("Use --allow-legacy to skip comparison safely.", file=sys.stderr)
+            sys.exit(2)
     if result_a.status == "error":
         for issue in result_a.issues:
             print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
         sys.exit(1)
 
-    policy_b, result_b, _ = resolve_policy(args.rulesB, args.dsl_mode)
+    policy_b, result_b, env_b = resolve_policy(args.rulesB, override_mode)
     if has_version_mismatch(result_b):
-        print("[error] rulesB is not version 2. Upgrade to DSL v2.", file=sys.stderr)
-        sys.exit(2)
+        if not args.allow_legacy:
+            print("[error] rulesB is not version 2. Upgrade to DSL v2.", file=sys.stderr)
+            print("Use --allow-legacy to skip comparison safely.", file=sys.stderr)
+            sys.exit(2)
     if result_b.status == "error":
         for issue in result_b.issues:
             print(f"[{issue.code}] {issue.where}: {issue.msg}", file=sys.stderr)
         sys.exit(1)
 
+    legacy_detected = has_version_mismatch(result_a) or has_version_mismatch(result_b)
+    if args.lock_mode:
+        if env_a or env_b or args.dsl_mode:
+            print(
+                "[info] --lock-mode overrides --dsl-mode / MODBOT_DSL_MODE / YAML dsl_mode for both variants",
+                file=sys.stderr,
+            )
+        policy_a = policy_b = type(policy_a).from_mode(args.lock_mode)
+
+    source_a = _mode_source(args.lock_mode, args.dsl_mode, env_a, result_a)
+    source_b = _mode_source(args.lock_mode, args.dsl_mode, env_b, result_b)
+
+    if legacy_detected and args.allow_legacy:
+        banner = (
+            f"policyA={policy_a.mode}(source={source_a}), "
+            f"policyB={policy_b.mode}(source={source_b})"
+        )
+        print(banner)
+        summary = AbSummary()
+        payload = summary.as_json()
+        payload["note"] = "skipped due to legacy ruleset"
+        out_json_path.parent.mkdir(parents=True, exist_ok=True)
+        out_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("[info] legacy rules detected. Comparison skipped (see note field).", file=sys.stderr)
+        return
+
     engine_a = RuleEngine(str(args.rulesA), policy=policy_a)
     engine_b = RuleEngine(str(args.rulesB), policy=policy_b)
+    banner = (
+        f"policyA={engine_a.policy.mode}(source={source_a}), "
+        f"policyB={engine_b.policy.mode}(source={source_b})"
+    )
+    if args.lock_mode:
+        banner += f", lock-mode={args.lock_mode}"
+    print(banner)
     if args.print_config:
         print("[A]", engine_a.describe_config())
         print("[B]", engine_b.describe_config())
     summary = AbSummary()
     sampler = TopNSampler(args.sample_diff)
-    args.out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out_csv_path.parent.mkdir(parents=True, exist_ok=True)
     iter_records = iter_jsonl(args.analysis, limit=args.limit, offset=args.offset, policy=engine_a.policy)
 
-    with args.out_csv.open("w", encoding="utf-8", newline="") as csvfile:
+    with out_csv_path.open("w", encoding="utf-8", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(
             [
@@ -225,11 +439,16 @@ def main() -> None:
             payload = build_diff_payload(record, res_a, res_b)
             sampler.consider(score, payload)
 
-    args.out_json.parent.mkdir(parents=True, exist_ok=True)
-    args.out_json.write_text(json.dumps(summary.as_json(), ensure_ascii=False, indent=2), encoding="utf-8")
+    out_json_path.parent.mkdir(parents=True, exist_ok=True)
+    out_json_path.write_text(json.dumps(summary.as_json(), ensure_ascii=False, indent=2), encoding="utf-8")
     if args.sample_diff:
-        export_path = (args.export_dir or Path("out/exports")).joinpath("p3_ab_diff_samples.jsonl")
-        sampler.export(export_path)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_path = export_dir.joinpath("p3_ab_diff_samples.jsonl")
+        sampler.export(
+            export_path,
+            minimal=args.samples_minimal,
+            redact_urls=args.samples_redact_urls,
+        )
 
 
 if __name__ == "__main__":

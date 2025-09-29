@@ -123,10 +123,10 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
      --analysis out/p2/p2_analysis_all.jsonl \\
      --rulesA configs/rules.yaml \\
      --rulesB configs/rules_v2.yaml \\
-     --out-json out/metrics/p3_ab_compare.json \\
-     --out-csv  out/exports/p3_ab_diff.csv \\
+     --out-dir out/exports \\
      --sample-diff 200 \\
-     --export-dir out/exports
+     --samples-minimal \\
+     --samples-redact-urls
    ```
 3. `p3_ab_compare.json` で counts/delta/混同行列、`p3_ab_diff.csv` で差分列、`p3_ab_diff_samples.jsonl` でレビュー用サンプルを確認
 4. 差分レビュー後、合意したルールを `configs/rules.yaml` に昇格
@@ -134,8 +134,11 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
 ## strict / warn モード
 - `warn`（既定）: 未知識別子や式エラーは 0/False にフォールバックし WARN を 1ルール×エラー種あたり最大5回表示
 - `strict`: ローダ/評価器のいずれかで例外化し、問題ルールを即時洗い出し
-- モードの優先順位は **CLI `--dsl-mode` > ENV `MODBOT_DSL_MODE` > YAML `dsl_mode` > warn** です。
-- strict を常用したい場合は `MODBOT_DSL_MODE=strict` を環境変数に設定するか、CLI で `--dsl-mode strict` を指定してください。
+- モードの優先順位は **`--lock-mode` > CLI `--dsl-mode` > ENV `MODBOT_DSL_MODE` > YAML `dsl_mode` > warn** です。`--lock-mode` を使うと A/B 両側を同一ポリシーで強制実行します。
+- strict を常用したい場合は `MODBOT_DSL_MODE=strict` を環境変数に設定するか、CLI で `--dsl-mode strict` を指定してください。両者を固定したい場合は `--lock-mode strict` を利用してください。
+- legacy ルール（`version: 1`）が混ざった場合は既定で比較を停止 (exit code 2) します。レビューだけ続行したい場合は `--allow-legacy` を付けると `p3_ab_compare.json` に `note="skipped due to legacy ruleset"` が追記され、CSV/サンプルは生成されません。
+- `--samples-minimal` を付けるとサンプル JSONL が最小ビュー（severity/rule/reasons/metrics のみ）で出力されます。`--samples-redact-urls` を併用すると URL フィールドは `null`、文中の URL は `[URL]` に置換されます。
+- `--out-dir DIR` を指定すると `DIR/p3_ab_compare.json`・`DIR/p3_ab_diff.csv`・`DIR/p3_ab_diff_samples.jsonl` が自動生成されます（個別指定よりも運用が容易）。
 - レガシー構成（`version: 1`）が残っている場合は `--allow-legacy --fallback green` で強制的に `severity=green` として出力できます（もしくは `--fallback skip` で書き込みを抑止）。
 - WARN が多い場合は strict で健全性を確認してから本番に適用してください
 

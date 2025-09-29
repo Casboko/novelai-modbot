@@ -179,10 +179,15 @@ python -m app.cli_rules_ab \
   --analysis out/p2/p2_analysis_all.jsonl \
   --rulesA configs/rules.yaml \
   --rulesB configs/rules_candidate.yaml \
-  --out-json out/metrics/p3_ab_compare.json \
-  --out-csv  out/exports/p3_ab_diff.csv \
+  --out-dir out/exports \
   --sample-diff 200 \
-  --export-dir out/exports
+  --samples-minimal \
+  --samples-redact-urls
+
+- `--out-dir` を指定すると `p3_ab_compare.json`・`p3_ab_diff.csv`・`p3_ab_diff_samples.jsonl` が同一ディレクトリにまとまり、既存の `--out-json/--out-csv` 指定は不要です。
+- モード解決は **`--lock-mode` > `--dsl-mode` > `MODBOT_DSL_MODE` > YAML `dsl_mode` > warn**。Runpod 上で両側のモードを固定したい場合は `--lock-mode strict` 等を追加してください。
+- legacy ルールを検出すると exit=2 で停止します。差分だけ確認したいときは `--allow-legacy` を付けると compare.json に `note="skipped due to legacy ruleset"` が入り、CSV/サンプルは生成されません。
+- サンプル JSONL を軽量化するには `--samples-minimal` を、URL を秘匿したい場合は `--samples-redact-urls` を併用してください（URL フィールドは null、テキスト内の URL は `[URL]` に置換）。
 ```
 
 ---
