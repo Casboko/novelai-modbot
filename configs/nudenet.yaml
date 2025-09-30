@@ -5,3 +5,11 @@ thresholds:
   auxiliary: 0.70
 keep_topk: 10
 batch_size: 8
+exposed_strong_threshold: 0.60
+explicit_exposed_labels:
+  - FEMALE_BREAST_EXPOSED
+  - MALE_BREAST_EXPOSED
+  - FEMALE_GENITALIA_EXPOSED
+  - MALE_GENITALIA_EXPOSED
+  - BUTTOCKS_EXPOSED
+  - ANUS_EXPOSED

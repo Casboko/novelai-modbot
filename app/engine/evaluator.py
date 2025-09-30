@@ -94,10 +94,23 @@ class DslEvaluator:
 
         xsignals = analysis.get("xsignals") or {}
         metrics: Dict[str, float] = {}
-        for key in ("exposure_score", "placement_risk_pre", "nsfw_margin", "nsfw_ratio", "nsfw_general_sum"):
+        for key in (
+            "exposure_score",
+            "placement_risk_pre",
+            "nsfw_margin",
+            "nsfw_ratio",
+            "nsfw_general_sum",
+            "nudity_area_ratio",
+            "nudity_box_count",
+        ):
             value = xsignals.get(key)
             if isinstance(value, (int, float)):
                 metrics[key] = float(value)
+
+        area_ratio = metrics.get("nudity_area_ratio", 0.0)
+        metrics["exposure_area"] = float(area_ratio)
+        box_count = metrics.get("nudity_box_count", 0.0)
+        metrics["exposure_count"] = float(box_count)
 
         messages = analysis.get("messages", []) or []
         attachment_count = 0

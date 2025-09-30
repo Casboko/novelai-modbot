@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Iterable, List, Mapping
+from typing import Dict, Iterable, List, Mapping, Sequence
 
 import random
 
@@ -38,6 +38,91 @@ WEAK_KEYWORDS = (
     "BUTTOCKS_COVERED",
     "BELLY_EXPOSED",
 )
+
+DEFAULT_EXPOSED_LABELS = {
+    "FEMALE_BREAST_EXPOSED",
+    "MALE_BREAST_EXPOSED",
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "ANUS_EXPOSED",
+}
+
+
+def _normalize_flag(flag: str) -> str:
+    return str(flag or "").upper().strip()
+
+
+def compute_nudity_exposure_metrics(
+    detections: Sequence[NudityDetection],
+    *,
+    allowed_labels: set[str],
+    min_score: float,
+    image_size: tuple[float, float] | None,
+) -> tuple[float, int]:
+    """Aggregate visible nudity area ratio and detection count."""
+
+    threshold = float(min_score) if min_score > 0 else 0.0
+
+    width_px: float | None = None
+    height_px: float | None = None
+    if image_size and len(image_size) == 2:
+        try:
+            width_px = float(image_size[0])
+            height_px = float(image_size[1])
+        except (TypeError, ValueError):
+            width_px = None
+            height_px = None
+        if width_px is not None and width_px <= 0:
+            width_px = None
+        if height_px is not None and height_px <= 0:
+            height_px = None
+
+    total_area = 0.0
+    count = 0
+
+    for det in detections:
+        label = _normalize_flag(det.cls)
+        if not label or "EXPOSED" not in label or "COVERED" in label:
+            continue
+        if allowed_labels and label not in allowed_labels:
+            continue
+        if float(det.score or 0.0) < threshold:
+            continue
+
+        box = det.box or []
+        if len(box) < 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        except (TypeError, ValueError):
+            continue
+        if any(value != value for value in (x1, y1, x2, y2)):
+            continue
+
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+        if width <= 0 or height <= 0:
+            width = abs(x2)
+            height = abs(y2)
+        if width <= 0 or height <= 0:
+            continue
+
+        area = width * height
+        if area <= 0:
+            continue
+
+        if width > 1.0 or height > 1.0:
+            if width_px and height_px:
+                area = area / (width_px * height_px)
+            else:
+                continue
+
+        total_area += area
+        count += 1
+
+    area_ratio = min(max(total_area, 0.0), 1.0)
+    return area_ratio, count
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge WD14 and NudeNet analysis")
@@ -233,6 +318,18 @@ async def async_main() -> None:
     exposure_weights = xsignals_cfg.get("exposure_score", {})
     placement_cfg = xsignals_cfg.get("placement_risk_pre", {})
 
+    exposed_labels_cfg = nudenet_cfg.get("explicit_exposed_labels") or []
+    allowed_exposed_labels: set[str] = {
+        _normalize_flag(value)
+        for value in exposed_labels_cfg
+        if isinstance(value, str) and _normalize_flag(value)
+    }
+    if not allowed_exposed_labels:
+        allowed_exposed_labels = set(DEFAULT_EXPOSED_LABELS)
+
+    base_threshold = float(overlay_thresholds.get("strong_exposed", 0.6))
+    explicit_threshold = float(nudenet_cfg.get("exposed_strong_threshold", base_threshold))
+
     analyzer = NudeNetAnalyzer()
     cache = NudeNetCache(args.nudenet_cache)
 
@@ -383,6 +480,7 @@ async def async_main() -> None:
                     for det in dets
                 ],
                 "version": analyzer.version,
+                "image_size": list(res.image.size),
             }
             cache.set(
                 NudeCacheKey(phash=res.request.identifier, model="nudenet", version=analyzer.version),
@@ -411,6 +509,20 @@ async def async_main() -> None:
                 for item in nudity_payload.get("detections", [])
             ]
             reduced_detections = keep_topk_detections(raw_detections, keep_topk)
+            payload_image_size = nudity_payload.get("image_size")
+            if isinstance(payload_image_size, (list, tuple)) and len(payload_image_size) >= 2:
+                try:
+                    image_size_tuple = (float(payload_image_size[0]), float(payload_image_size[1]))
+                except (TypeError, ValueError):
+                    image_size_tuple = None
+            else:
+                image_size_tuple = None
+            exposure_area_ratio, exposure_count = compute_nudity_exposure_metrics(
+                reduced_detections,
+                allowed_labels=allowed_exposed_labels,
+                min_score=explicit_threshold,
+                image_size=image_size_tuple,
+            )
             exposure_score = compute_exposure_score(reduced_detections, overlay_thresholds, exposure_weights)
             placement_risk = compute_placement_risk(wd14_payload, exposure_score, placement_cfg)
 
@@ -472,6 +584,8 @@ async def async_main() -> None:
                     "nsfw_margin": nsfw_margin,
                     "nsfw_ratio": nsfw_ratio,
                     "nsfw_general_sum": nsfw_general_sum,
+                    "nudity_area_ratio": exposure_area_ratio,
+                    "nudity_box_count": exposure_count,
                 },
                 "meta": {
                     "nudenet_version": analyzer.version,

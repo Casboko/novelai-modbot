@@ -93,7 +93,8 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
   ```
 - 利用可能な変数・関数
   - 変数: `rating.*`, `exposure_peak`, `minors_peak`, `channel.is_nsfw`, `message.is_spoiler`, `attachment_count` など（既存メトリクスは `metrics` 経由で DSL にバインド済み）。
-  - 関数: `score(tag)`, `sum(group)`, `max(group)`, `any(group, gt=0.35)`, `count(group, gt=0.35)`, `clamp(x, lo, hi)`, `nude.has(flag)`, `nude.any(prefix="EXPOSED_", min=1)` など。
+  - 関数: `score(tag)`, `sum(group)`, `max(group)`, `any(group, gt=0.35)`, `count(group, gt=0.35)`, `topk_sum(group, k, gt=0.35)`, `clamp(x, lo, hi)`, `nude.has(flag)`, `nude.any(prefix="EXPOSED_", min=1)` など。
+  - 新規メトリクス: `exposure_area` / `exposure_count` （`analysis_merge` が `nudity_area_ratio` / `nudity_box_count` を計上した値）。
 - `app/engine/` 配下に Safe AST ベースの DSL ランタイムを実装済み。`DslProgram.evaluate()` の結果は `metrics.dsl` / `metrics.winning` に格納され、最終判定は DSL ベースで一貫します（legacy は `--allow-legacy` 併用時のフォールバックのみ）。
 - 厳格モードが必要な場合は `dsl_mode: strict` を `rules.yaml` に追加すると未知変数やゼロ除算で即エラーになります（既定は `warn` モードで 0/False にフォールバック）。
 - DSL の単体テストは `tests/engine/test_dsl_program.py` を参考に追加してください。主要ケース（命中、非命中、安全性と禁止ノード）を網羅することが推奨です。

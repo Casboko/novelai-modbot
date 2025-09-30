@@ -52,7 +52,7 @@ class _ExpressionValidator(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         if isinstance(func, ast.Name):
-            if func.id not in {"score", "sum", "max", "min", "any", "count", "clamp"}:
+            if func.id not in {"score", "sum", "max", "min", "any", "count", "clamp", "topk_sum"}:
                 raise DslValidationError(f"function '{func.id}' is not allowed")
         elif isinstance(func, ast.Attribute):
             if isinstance(func.value, ast.Attribute):

@@ -24,7 +24,7 @@ from .types import (
 __all__ = ["load_rules_result", "load_rule_config"]
 
 _ALLOWED_KEYS = {"version", "dsl_mode", "rule_titles", "groups", "features", "rules"}
-_GROUP_FUNCS = {"sum", "max", "any", "count"}
+_GROUP_FUNCS = {"sum", "max", "any", "count", "topk_sum"}
 _ALLOWED_FUNCTIONS = list_builtin_functions()
 _BASE_IDENTIFIERS = list_builtin_identifiers() | {"rating", "channel", "message", "nude", "attachment_count", "metrics"}
 

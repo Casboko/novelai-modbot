@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .tag_norm import normalize_tag
 
 _WILDCARD_CHARS = set("*?[")
 
-_BUILTIN_FUNCTIONS = {"score", "sum", "max", "min", "any", "count", "clamp"}
+_BUILTIN_FUNCTIONS = {"score", "sum", "max", "min", "any", "count", "clamp", "topk_sum"}
 _BASE_IDENTIFIERS = {
     "rating",
     "channel",
@@ -32,6 +32,10 @@ _BASE_IDENTIFIERS = {
     "dismember_peak",
     "gore_sum",
     "drug_score",
+    "nudity_area_ratio",
+    "nudity_box_count",
+    "exposure_area",
+    "exposure_count",
 }
 
 
@@ -131,6 +135,12 @@ class _GroupResolver:
                 hits += 1
         return hits
 
+    def values(self, name: str) -> tuple[float, ...]:
+        tags = self._resolve(name)
+        if not tags:
+            return ()
+        return tuple(float(self._tag_scores.get(tag, 0.0)) for tag in tags)
+
 
 @dataclass(slots=True)
 class RuntimeContext:
@@ -181,6 +191,33 @@ def build_context(
     def count_func(group_name: str, *, gt: float = 0.35) -> int:
         return resolver.count(group_name, gt=gt)
 
+    def topk_sum_func(group_name: str, k: Any, gt: Any | None = None) -> float:
+        try:
+            limit = int(k)
+        except (TypeError, ValueError):
+            return 0.0
+        if limit <= 0:
+            return 0.0
+
+        scores = list(resolver.values(str(group_name)))
+        if not scores:
+            return 0.0
+
+        threshold: float | None
+        if gt is None:
+            threshold = None
+        else:
+            try:
+                threshold = float(gt)
+            except (TypeError, ValueError):
+                threshold = None
+        if threshold is not None:
+            scores = [score for score in scores if score >= threshold]
+        if not scores:
+            return 0.0
+        scores.sort(reverse=True)
+        return float(sum(scores[:limit]))
+
     namespace: dict[str, Any] = {}
 
     rating_map: dict[str, float] = {
@@ -213,6 +250,7 @@ def build_context(
     namespace["min"] = min_func
     namespace["any"] = any_func
     namespace["count"] = count_func
+    namespace["topk_sum"] = topk_sum_func
 
     return RuntimeContext(namespace=namespace, resolver=resolver)
 

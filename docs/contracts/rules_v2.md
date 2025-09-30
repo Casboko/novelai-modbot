@@ -63,9 +63,13 @@
 ### 式の静的解析
 
 - 利用可能識別子: `rating.*`, `channel.is_nsfw`, `message.is_spoiler`, `attachment_count` など `dsl_runtime.list_builtin_identifiers()` が返す集合 + 成功した `features` 名
-- 許可関数: `score`, `sum`, `max`, `min`, `any`, `count`, `clamp`
+- 許可関数: `score`, `sum`, `max`, `min`, `any`, `count`, `clamp`, `topk_sum`
 - グループ関数の第 1 引数がリテラル文字列のとき、`groups` に存在する必要あり
 - `metrics.*` 参照は許可（動的値として扱う）
+
+追加メトリクス:
+
+- `exposure_area` / `exposure_count` — `analysis_merge` が算出する `nudity_area_ratio` / `nudity_box_count` のエイリアス。DSL から直接参照できます。
 
 ### `rules[].reasons`
 
