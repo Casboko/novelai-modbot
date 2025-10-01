@@ -5,6 +5,11 @@ import time
 from dataclasses import dataclass
 import random
 from typing import Optional
+import mimetypes
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import aiohttp
 
@@ -48,6 +53,9 @@ class ImageFetcher:
         self._max_backoff = max_backoff
 
     async def fetch(self, url: str) -> FetchResult:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() == "file":
+            return self._fetch_local(parsed)
         head_ct, head_size, head_note = await self._head(url)
         if head_note and head_note != "method_not_allowed":
             return FetchResult(None, head_ct, head_size, head_note)
@@ -60,6 +68,18 @@ class ImageFetcher:
         if final_ct and not final_ct.lower().startswith("image/"):
             return FetchResult(None, final_ct, len(data), "not_image")
         return FetchResult(data, final_ct, get_size or head_size or len(data), None)
+
+    def _fetch_local(self, parsed_url) -> FetchResult:
+        path = self._path_from_file_url(parsed_url)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return FetchResult(None, None, None, "local_missing")
+        except OSError as exc:
+            return FetchResult(None, None, None, f"local_error:{exc.__class__.__name__}")
+        content_type, _ = mimetypes.guess_type(str(path))
+        content_type = content_type or "application/octet-stream"
+        return FetchResult(data, content_type, len(data), "local")
 
     async def _head(self, url: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
         last_note: Optional[str] = None
@@ -134,3 +154,18 @@ class ImageFetcher:
             jitter = random.uniform(0, 0.5)
             delay = base + jitter
         return max(0.1, min(delay, self._max_backoff))
+
+    @staticmethod
+    def _path_from_file_url(parsed_url) -> Path:
+        if parsed_url.scheme.lower() != "file":
+            raise ValueError("URL scheme must be file")
+        path_str = url2pathname(parsed_url.path)
+        netloc = parsed_url.netloc
+        if netloc:
+            if os.name == "nt":
+                path_str = f"//{netloc}{path_str}"
+            else:
+                path_str = f"/{netloc}{path_str}"
+        if not path_str:
+            path_str = "/"
+        return Path(path_str)

@@ -24,6 +24,7 @@ from .batch_loader import ImageLoadResult, ImageRequest, load_images
 from .cache_wd14 import CacheKey, WD14Cache
 from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
+from .local_cache import resolve_local_file
 
 
 @dataclass(slots=True)
@@ -114,7 +115,14 @@ def build_requests(entries: dict[str, Entry], missing: Iterable[str]) -> list[Im
     requests: list[ImageRequest] = []
     for phash in missing:
         entry = entries[phash]
-        requests.append(ImageRequest(identifier=phash, urls=tuple(entry.urls)))
+        urls = list(entry.urls)
+        local_path = resolve_local_file(phash)
+        if local_path:
+            local_uri = Path(local_path).as_uri()
+            if local_uri in urls:
+                urls.remove(local_uri)
+            urls.insert(0, local_uri)
+        requests.append(ImageRequest(identifier=phash, urls=tuple(urls)))
     return requests
 
 

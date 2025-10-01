@@ -23,6 +23,7 @@ from .batch_loader import ImageRequest, load_images
 from .cache_nudenet import CacheKey as NudeCacheKey, NudeNetCache
 from .calibration import apply_wd14_calibration, load_calibration
 from .schema import MessageRef, NudityDetection, parse_bool
+from .local_cache import resolve_local_file
 
 
 STRONG_KEYWORDS = (
@@ -436,13 +437,16 @@ async def async_main() -> None:
 
     async def process_batch(batch_phashes: list[str]) -> None:
         nonlocal total_latency_ms, processed, nn_executed, nn_lat_samples
-        requests = [
-            ImageRequest(
-                identifier=phash,
-                urls=tuple(scan_entries[phash]["urls"]),
-            )
-            for phash in batch_phashes
-        ]
+        requests: list[ImageRequest] = []
+        for phash in batch_phashes:
+            urls = list(scan_entries[phash]["urls"])
+            local_path = resolve_local_file(phash)
+            if local_path:
+                local_uri = Path(local_path).as_uri()
+                if local_uri in urls:
+                    urls.remove(local_uri)
+                urls.insert(0, local_uri)
+            requests.append(ImageRequest(identifier=phash, urls=tuple(urls)))
         results = await load_images(requests, qps=args.qps, concurrency=args.concurrency)
         ok_results = []
         for result in results:
