@@ -12,6 +12,9 @@ __pycache__/
 # Scanner outputs
 out/
 tmp/
+tools/scl_viewer/tmp/
+tools/scl_viewer/thumbs/
+cache/imgs/
 
 # Local caches / databases
 *.sqlite

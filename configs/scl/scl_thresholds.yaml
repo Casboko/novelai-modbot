@@ -1,0 +1,47 @@
+# Streamlit UI 用の暫定しきい値。数値は現行 rules_v2.yaml の条件値を写経したものです。
+# 将来的にチューニングしたらこのファイルを更新し、DSL 側では features.T_* として参照します。
+minor:
+  peak_conf:
+    red: 0.30
+  body_score:
+    red: 0.70
+  context_score:
+    red: 0.80
+  special_score:
+    yellow: 0.35
+sexual:
+  intensity:
+    red_high: 0.80
+    red: 0.50
+    orange: 0.40
+    yellow: 0.30
+    caution: 0.20
+explicit:
+  score:
+    red: 0.50
+    orange: 0.30
+    yellow: 0.20
+exposure:
+  area:
+    high: 0.20
+    mid: 0.15
+    low: 0.10
+  count:
+    high: 2
+nsfw_rating:
+  max:
+    orange: 0.50
+gore:
+  peak_conf:
+    warn: 0.20
+  density:
+    warn: 3
+  intensity:
+    red: 2.50
+    orange: 2.00
+animal:
+  presence:
+    yellow: 0.30
+bestiality:
+  direct:
+    red: 0.20
