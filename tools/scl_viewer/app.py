@@ -382,9 +382,9 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         default_columns = _default_visible_columns(available_columns, preset)
 
         previous_preset = st.session_state.get("_scl_prev_preset")
-        if previous_preset != preset:
+        if previous_preset != preset or "scl_visible_columns" not in st.session_state:
             st.session_state["_scl_prev_preset"] = preset
-            st.session_state["scl_visible_columns"] = default_columns
+            st.session_state["scl_visible_columns"] = default_columns or available_columns
 
         visible_columns = st.multiselect(
             "表示列",
@@ -395,7 +395,6 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         visible_columns = [col for col in visible_columns if col in filtered.columns]
         if not visible_columns:
             visible_columns = default_columns or available_columns
-        st.session_state["scl_visible_columns"] = visible_columns
         df_show = filtered[visible_columns]
 
         table_column_config: dict[str, Any] = {}
