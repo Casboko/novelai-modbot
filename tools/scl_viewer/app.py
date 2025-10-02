@@ -405,27 +405,34 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
                 width=120,
             )
 
-        st.dataframe(
-            df_show.reset_index(drop=True),
-            width="stretch",
-            column_config=table_column_config,
-        )
+        rendered_df = df_show.reset_index(drop=True)
+        st.dataframe(rendered_df, width="stretch", column_config=table_column_config)
 
-        selected_phash = None
-        if not filtered.empty and "phash" in filtered.columns:
-            options = filtered["phash"].tolist()
-            default_index = 0
-            stored = st.session_state.get("last_selected_phash")
-            if stored in options:
-                default_index = options.index(stored)
-            selected_phash = st.selectbox(
-                "詳細表示するレコード",
-                options,
-                index=default_index,
-                key="scl_selected_phash",
+        if not rendered_df.empty:
+            total_rows = len(rendered_df)
+            stored_index = st.session_state.get("last_selected_index")
+            if stored_index is None or stored_index >= total_rows:
+                stored_index = 0
+            prev_btn, next_btn = st.columns([1, 1])
+            with prev_btn:
+                if st.button("◀", disabled=total_rows <= 1, key="scl_prev_record"):
+                    stored_index = (stored_index - 1) % total_rows
+            with next_btn:
+                if st.button("▶", disabled=total_rows <= 1, key="scl_next_record"):
+                    stored_index = (stored_index + 1) % total_rows
+            index_input = st.number_input(
+                "表示するレコード番号",
+                min_value=0,
+                max_value=total_rows - 1,
+                value=stored_index,
+                step=1,
+                key="scl_selected_index",
             )
+            st.session_state["last_selected_index"] = index_input
+            selected_phash = rendered_df.loc[index_input, "phash"] if "phash" in rendered_df.columns else None
             st.session_state["last_selected_phash"] = selected_phash
         else:
+            st.session_state["last_selected_index"] = None
             st.session_state["last_selected_phash"] = None
 
         st.session_state["findings_df"] = df
