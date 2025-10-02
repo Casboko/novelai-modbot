@@ -397,7 +397,6 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             key="scl_visible_columns",
         )
         visible_columns = [col for col in visible_columns if col in filtered.columns]
-        st.session_state["scl_visible_columns"] = visible_columns
         df_show = filtered[["selected"] + visible_columns]
 
         column_config: dict[str, Any] = {
