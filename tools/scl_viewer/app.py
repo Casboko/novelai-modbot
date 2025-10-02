@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,42 @@ DEFAULT_RULES = Path("configs/rules_v2.yaml")
 DEFAULT_THRESHOLDS = Path("configs/scl/scl_thresholds.yaml")
 DEFAULT_ANALYSIS = Path("out/p2/p2_analysis_all.jsonl")
 DEFAULT_RULES_PREV = Path("configs/rules_v2_prev.yaml")
+
+COLUMN_PRESETS: dict[str, list[str] | None] = {
+    "Moderation Core": [
+        "phash",
+        "severity",
+        "rule_id",
+        "rule_title",
+        "wd14_rating_g",
+        "wd14_rating_s",
+        "wd14_rating_q",
+        "wd14_rating_e",
+        "exposure_area",
+        "exposure_count",
+        "exposure_score",
+        "coercion_score",
+    ],
+    "v2 Features": [
+        "phash",
+        "severity",
+        "rule_id",
+        "rule_title",
+        "explicit_score",
+        "sexual_intensity",
+        "nsfw_rating_max",
+        "minor_peak_conf",
+        "minor_body_score",
+        "minor_context_score",
+        "minor_special_score",
+        "gore_peak_conf",
+        "gore_density",
+        "gore_intensity",
+        "animal_presence",
+        "coercion_score",
+    ],
+    "All": None,
+}
 
 
 def main() -> None:
@@ -308,62 +345,100 @@ def load_ab_outputs() -> None:
 
 
 def render_findings(records: list[dict], state: SidebarState) -> None:
+    rules_source = st.session_state.get("rules_effective_path")
+    rules_path = Path(rules_source) if rules_source else state.rules_path
+
     df = st.session_state.get("findings_df")
     if df is None:
-        rules_source = st.session_state.get("rules_effective_path")
-        rules_path = Path(rules_source) if rules_source else state.rules_path
         df = build_findings_dataframe(records, rules_path=rules_path)
-        st.session_state["findings_df"] = df
+    df = df.copy()
+    if "selected" not in df.columns:
+        df.insert(0, "selected", False)
+    last_selected = st.session_state.get("last_selected_phash")
+    if last_selected and "phash" in df.columns:
+        df.loc[df["phash"] == last_selected, "selected"] = True
+
     filtered = df
-    if state.severity_filter:
+    if state.severity_filter and "severity" in filtered.columns:
         filtered = filtered[filtered["severity"].isin(state.severity_filter)]
-    if state.rule_query:
+    if state.rule_query and "rule_id" in filtered.columns:
         filtered = filtered[filtered["rule_id"].str.contains(state.rule_query, case=False, na=False)]
-    if state.exposure_min > 0:
+    if state.exposure_min > 0 and "exposure_area" in filtered.columns:
         filtered = filtered[filtered["exposure_area"].fillna(0.0) >= state.exposure_min]
-    filtered = filtered.sort_values("severity", key=_severity_sort_key)
+    filtered = filtered.copy()
+    if "severity" in filtered.columns:
+        filtered = filtered.sort_values("severity", key=_severity_sort_key)
+
+    st.session_state["findings_df"] = df
+
     st.subheader("Findings")
-    column_config = {
-        "thumbnail": st.column_config.ImageColumn(
-            "thumb",
-            help="p0 添付から生成したサムネイル",
-            width="small",
+    left_col, right_col = st.columns([5, 3], gap="large")
+
+    with left_col:
+        preset = st.radio(
+            "列プリセット",
+            list(COLUMN_PRESETS.keys()),
+            horizontal=True,
+            key="scl_column_preset",
         )
-    }
-    st.dataframe(filtered, use_container_width=True, column_config=column_config)
-    render_gallery(filtered, records)
 
+        available_columns = [col for col in filtered.columns if col != "selected"]
+        default_columns = _default_visible_columns(available_columns, preset)
 
-def render_gallery(df: pd.DataFrame, records: list[dict], *, columns: int = 3) -> None:
-    st.markdown("#### サムネイル")
-    if df.empty:
-        st.info("フィルタに一致するレコードがありません。")
-        return
-    record_map = {record.get("phash"): record for record in records}
-    rows = []
-    for phash in df["phash"].dropna().head(12):
-        record = record_map.get(phash)
-        if not record:
-            continue
-        thumb = get_thumbnail_for_record(record)
-        rows.append((record, thumb))
-    if not rows:
-        st.info("表示できるサムネイルがありません。")
-        return
-    for start in range(0, len(rows), columns):
-        cols = st.columns(columns)
-        for col, (record, thumb_path) in zip(cols, rows[start : start + columns]):
-            with col:
-                if thumb_path and thumb_path.exists():
-                    col.image(str(thumb_path), use_container_width=True)
-                else:
-                    col.write("(画像なし)")
-                col.caption(
-                    f"{record.get('severity', '').upper()} | {record.get('rule_id') or ''}\n"
-                    f"{'; '.join(record.get('reasons', []))}"
-                )
+        previous_preset = st.session_state.get("_scl_prev_preset")
+        if previous_preset != preset:
+            st.session_state["_scl_prev_preset"] = preset
+            st.session_state["scl_visible_columns"] = default_columns
 
+        visible_columns = st.multiselect(
+            "表示列",
+            options=available_columns,
+            default=st.session_state.get("scl_visible_columns", default_columns),
+            key="scl_visible_columns",
+        )
+        visible_columns = [col for col in visible_columns if col in filtered.columns]
+        st.session_state["scl_visible_columns"] = visible_columns
+        df_show = filtered[["selected"] + visible_columns]
 
+        column_config: dict[str, Any] = {
+            "selected": st.column_config.CheckboxColumn("選択", help="右ペインに詳細を表示します"),
+        }
+        if "thumbnail" in df_show.columns:
+            column_config["thumbnail"] = st.column_config.ImageColumn(
+                "thumb",
+                help="p0 添付から生成したサムネイル",
+                width="small",
+            )
+
+        edited = st.data_editor(
+            df_show,
+            hide_index=True,
+            use_container_width=True,
+            column_config=column_config,
+            disabled=[col for col in df_show.columns if col != "selected"],
+            key="scl_findings_editor",
+        )
+
+        edited_selected = edited.get("selected", []) if edited is not None else []
+        selected_flags = [bool(flag) for flag in edited_selected]
+        filtered_indices = list(filtered.index)
+        df.loc[:, "selected"] = False
+        selected_indices = [idx for idx, flag in zip(filtered_indices, selected_flags) if flag]
+        if selected_indices:
+            df.loc[selected_indices, "selected"] = True
+            selected_idx = selected_indices[-1]
+            selected_phash = df.loc[selected_idx, "phash"] if "phash" in df.columns else None
+        else:
+            selected_phash = None
+        st.session_state["findings_df"] = df
+        st.session_state["last_selected_phash"] = selected_phash
+
+    with right_col:
+        selected_record = None
+        selected_phash = st.session_state.get("last_selected_phash")
+        if selected_phash:
+            selected_record = next((rec for rec in records if rec.get("phash") == selected_phash), None)
+        render_detail_panel(selected_record, rules_path=rules_path)
 def get_thumbnail_for_record(record: dict) -> Path | None:
     phash = record.get("phash")
     if not phash:
@@ -466,6 +541,7 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         dsl = metrics.get("dsl", {}) or {}
         feats = (dsl.get("features", {}) or {})
         thumb_path = get_thumbnail_for_record(record)
+        ratings = _extract_wd14_rating(record)
         row = {
             "thumbnail": str(thumb_path) if thumb_path else None,
             "phash": record.get("phash"),
@@ -480,12 +556,304 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             "nsfw_general_sum": metrics.get("nsfw_general_sum"),
             "placement_risk": metrics.get("placement_risk") or metrics.get("placement_risk_pre"),
             "winning_rule": (metrics.get("winning", {}) or {}).get("rule_id"),
+            "wd14_rating_g": ratings.get("g"),
+            "wd14_rating_s": ratings.get("s"),
+            "wd14_rating_q": ratings.get("q"),
+            "wd14_rating_e": ratings.get("e"),
         }
         for feature_name in col_features:
             row[feature_name] = feats.get(feature_name)
         rows.append(row)
     df = pd.DataFrame(rows)
     return df
+
+
+def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
+    st.subheader("詳細")
+    if not record:
+        st.info("左の表で行を選択すると詳細を表示します。")
+        return
+
+    severity = record.get("severity") or "-"
+    rule_id = record.get("rule_id") or "-"
+    rule_title = record.get("rule_title")
+    summary_parts = [f"Severity: {severity}", f"Rule: {rule_id}"]
+    if rule_title:
+        summary_parts.append(rule_title)
+    st.markdown(" | ".join(summary_parts))
+
+    reasons = record.get("reasons") or []
+    if reasons:
+        st.write("Reasons: " + "; ".join(reasons))
+
+    message_link = record.get("message_link")
+    if message_link:
+        st.markdown(f"[Message Link]({message_link})")
+
+    thumb_path = get_thumbnail_for_record(record)
+    if thumb_path and thumb_path.exists():
+        st.image(str(thumb_path), use_container_width=True)
+
+    metrics = record.get("metrics", {}) or {}
+    ratings = _extract_wd14_rating(record)
+    nude = _extract_nudenet_metrics(record)
+
+    rating_cols = st.columns(4)
+    rating_labels = {"g": "wd14:g", "s": "wd14:s", "q": "wd14:q", "e": "wd14:e"}
+    for col, key in zip(rating_cols, ("g", "s", "q", "e")):
+        value = ratings.get(key)
+        if value is None:
+            col.metric(rating_labels[key], "-")
+        else:
+            col.metric(rating_labels[key], f"{value:.2f}")
+
+    nude_cols = st.columns(3)
+    nude_cols[0].metric("exposure_area", f"{nude['area']:.3f}")
+    nude_cols[1].metric("exposure_count", str(nude["count"]))
+    nude_cols[2].metric("exposure_score", f"{nude['score']:.3f}")
+
+    if nude["by_class"]:
+        with st.expander("NudeNet クラス別スコア", expanded=False):
+            nude_df = pd.DataFrame(
+                sorted(nude["by_class"].items(), key=lambda item: item[1], reverse=True),
+                columns=["class", "score"],
+            )
+            st.dataframe(nude_df, use_container_width=True, hide_index=True)
+
+    dsl = metrics.get("dsl", {}) or {}
+    feature_values = (dsl.get("features", {}) or {})
+    if feature_values:
+        with st.expander("features スコア", expanded=True):
+            for name, value in sorted(feature_values.items()):
+                st.write(_format_feature_value(name, value))
+    else:
+        st.info("metrics.dsl.features が見つかりません。v2 ルールで再スキャンすると詳細が表示されます。")
+
+    rules_data = _load_rules_for_detail(rules_path)
+    winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
+    if winning_rule_id:
+        rule_entry = (rules_data.get("rules") or {}).get(winning_rule_id)
+        if rule_entry and rule_entry.get("when"):
+            with st.expander(f"ルール {winning_rule_id} の when 式", expanded=True):
+                when_clause = rule_entry.get("when")
+                st.code(when_clause, language="text")
+                when_summary = _build_when_summary(
+                    when_clause,
+                    record,
+                    feature_values,
+                    rules_data.get("features") or {},
+                )
+                if when_summary:
+                    summary_df = pd.DataFrame(when_summary)
+                    if "result" in summary_df.columns:
+                        summary_df["result"] = summary_df["result"].map(
+                            lambda flag: "✅" if flag else ("❌" if flag is False else "-")
+                        )
+                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
+    if group_hits:
+        with st.expander("タググループ × topk（ヒットのみ）", expanded=False):
+            for group_name, items in group_hits.items():
+                if not items:
+                    continue
+                with st.expander(f"{group_name}（{len(items)}）", expanded=False):
+                    df_hits = pd.DataFrame(items, columns=["tag", "score"])
+                    st.dataframe(df_hits, use_container_width=True, hide_index=True)
+                    if not df_hits.empty:
+                        chart_df = df_hits.head(10).set_index("tag")
+                        st.bar_chart(chart_df)
+
+
+def _default_visible_columns(columns: list[str], preset: str) -> list[str]:
+    preset_columns = COLUMN_PRESETS.get(preset)
+    if preset_columns is None:
+        return [col for col in columns if col != "thumbnail"]
+    resolved = [col for col in preset_columns if col in columns]
+    return resolved or [col for col in columns if col != "thumbnail"]
+
+
+def _format_feature_value(name: str, value: Any) -> str:
+    if isinstance(value, (int, float)):
+        icon = "⚪"
+        if value >= 0.9:
+            icon = "🔴"
+        elif value >= 0.7:
+            icon = "🟠"
+        return f"{icon} {name}: {value:.3f}"
+    return f"⚪ {name}: {value}"
+
+
+def _extract_wd14_rating(record: dict) -> dict[str, float | None]:
+    metrics = record.get("metrics", {}) or {}
+    rating = metrics.get("wd14_rating")
+    if isinstance(rating, dict):
+        return {key: _safe_float(rating.get(key)) for key in ("g", "s", "q", "e")}
+    return {
+        "g": _safe_float(metrics.get("general_rating")),
+        "s": _safe_float(metrics.get("sensitive_rating")),
+        "q": _safe_float(metrics.get("questionable")),
+        "e": _safe_float(metrics.get("explicit")),
+    }
+
+
+def _extract_nudenet_metrics(record: dict) -> dict[str, Any]:
+    metrics = record.get("metrics", {}) or {}
+    result: dict[str, Any] = {
+        "area": float(metrics.get("exposure_area") or 0.0),
+        "count": int(metrics.get("exposure_count") or 0),
+        "score": float(metrics.get("exposure_score") or 0.0),
+        "by_class": {},
+    }
+    nudenet = metrics.get("nudenet") or {}
+    exposure_scores = nudenet.get("exposure_scores") or {}
+    if isinstance(exposure_scores, dict):
+        result["by_class"] = {
+            name: float(score)
+            for name, score in exposure_scores.items()
+            if isinstance(score, (int, float)) and score > 0
+        }
+    return result
+
+
+def _load_rules_for_detail(rules_path: Path) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return {}
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    raw_features = data.get("features") if isinstance(data.get("features"), dict) else {}
+    rules_map: dict[str, dict[str, Any]] = {}
+    for rule in data.get("rules", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_id = rule.get("id")
+        if not isinstance(rule_id, str):
+            continue
+        rules_map[rule_id] = {
+            "when": rule.get("when"),
+            "severity": rule.get("severity"),
+        }
+    return {"groups": groups, "features": raw_features, "rules": rules_map}
+
+
+COMPARISON_PATTERN = re.compile(r"([A-Za-z0-9_.]+)\s*(>=|<=|>|<|==)\s*(T_[A-Za-z0-9_]+|\d+(?:\.\d+)?)")
+
+
+def _build_when_summary(
+    when_clause: str,
+    record: dict,
+    feature_values: dict[str, Any],
+    feature_defs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not when_clause:
+        return []
+    numeric_values: dict[str, float] = {}
+    for name, value in feature_values.items():
+        numeric = _safe_float(value)
+        if numeric is not None:
+            numeric_values[name] = numeric
+    metrics = record.get("metrics", {}) or {}
+    for name, value in metrics.items():
+        numeric = _safe_float(value)
+        if numeric is not None:
+            numeric_values.setdefault(name, numeric)
+
+    threshold_values: dict[str, float] = {}
+    for name, value in feature_defs.items():
+        numeric = _safe_float(value)
+        if numeric is not None:
+            threshold_values[name] = numeric
+
+    rows: list[dict[str, Any]] = []
+    for lhs, operator, rhs in COMPARISON_PATTERN.findall(when_clause):
+        metric_name = lhs.split(".")[-1]
+        current_value = numeric_values.get(metric_name)
+        threshold_value: float | None
+        threshold_label = rhs
+        if rhs.startswith("T_"):
+            threshold_value = threshold_values.get(rhs)
+        else:
+            threshold_value = _safe_float(rhs)
+        result = None
+        if current_value is not None and threshold_value is not None:
+            result = _evaluate_comparison(current_value, operator, threshold_value)
+        rows.append(
+            {
+                "metric": metric_name,
+                "value": current_value,
+                "operator": operator,
+                "threshold_label": threshold_label,
+                "threshold": threshold_value,
+                "result": result,
+            }
+        )
+    return rows
+
+
+def _evaluate_comparison(value: float, operator: str, threshold: float) -> bool:
+    if operator == ">=":
+        return value >= threshold
+    if operator == ">":
+        return value > threshold
+    if operator == "<=":
+        return value <= threshold
+    if operator == "<":
+        return value < threshold
+    if operator == "==":
+        return value == threshold
+    return False
+
+
+def compute_group_hits(
+    record: dict,
+    groups: dict[str, list[str]],
+    *,
+    topk: int = 256,
+) -> dict[str, list[tuple[str, float]]]:
+    wd14 = record.get("wd14") or {}
+    pairs: list[tuple[str, float]] = []
+    general_topk = wd14.get("general_topk")
+    if isinstance(general_topk, list):
+        for item in general_topk:
+            if isinstance(item, dict):
+                tag = item.get("name")
+                score = _safe_float(item.get("score"))
+                if isinstance(tag, str) and score is not None:
+                    pairs.append((tag, score))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                tag = item[0]
+                score = _safe_float(item[1])
+                if isinstance(tag, str) and score is not None:
+                    pairs.append((tag, score))
+    if not pairs:
+        general_raw = wd14.get("general_raw")
+        if isinstance(general_raw, list):
+            for tag, score in general_raw[:topk]:
+                value = _safe_float(score)
+                if isinstance(tag, str) and value is not None:
+                    pairs.append((tag, value))
+    if not pairs:
+        return {}
+    pairs = sorted(pairs, key=lambda item: item[1], reverse=True)[:topk]
+    scores = {tag: score for tag, score in pairs}
+    hits: dict[str, list[tuple[str, float]]] = {}
+    for group_name, group_tags in (groups or {}).items():
+        if not isinstance(group_tags, list):
+            continue
+        matched = [(tag, scores[tag]) for tag in group_tags if tag in scores]
+        if matched:
+            hits[group_name] = sorted(matched, key=lambda item: item[1], reverse=True)
+    return hits
+
+
+def _safe_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _discover_feature_ids(rules_path: Path | None) -> list[str]:
