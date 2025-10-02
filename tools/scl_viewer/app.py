@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,17 +10,22 @@ from typing import Any, Iterable
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.batch_loader import ImageRequest, load_images
+from app.local_cache import resolve_local_file
 from tools.scl_viewer import utils
 
 TMP_DIR = Path("tools/scl_viewer/tmp")
-THUMBS_DIR = Path("tools/scl_viewer/thumbs")
-CACHE_DIR = Path("cache/imgs")
+THUMBS_DIR = Path(os.getenv("SCL_CACHE_THUMBS", "tools/scl_viewer/thumbs"))
+CACHE_ROOT = Path(os.getenv("CACHE_ROOT", "cache"))
+CACHE_DIR = Path(os.getenv("SCL_CACHE_FULL", CACHE_ROOT / "imgs"))
+SCL_NO_FETCH = os.getenv("SCL_NO_FETCH", "0") == "1"
+
 FINDINGS_PATH = TMP_DIR / "findings.jsonl"
 REPORT_PATH = TMP_DIR / "report.csv"
 RULES_COMPILED_PATH = TMP_DIR / "rules_compiled.yaml"
@@ -185,6 +191,7 @@ def handle_run(placeholder, state: SidebarState) -> None:
             return
         st.success("cli_scan 完了")
         st.code(result.stdout)
+        st.session_state["rules_effective_path"] = str(compiled.rules_path)
         load_findings_into_state()
 
 
@@ -277,7 +284,9 @@ def load_findings_into_state() -> None:
         st.error(str(exc))
         return
     st.session_state["findings_records"] = records
-    st.session_state["findings_df"] = build_findings_dataframe(records)
+    rules_source = st.session_state.get("rules_effective_path")
+    rules_path = Path(rules_source) if rules_source else DEFAULT_RULES
+    st.session_state["findings_df"] = build_findings_dataframe(records, rules_path=rules_path)
 
 
 def load_ab_outputs() -> None:
@@ -301,7 +310,10 @@ def load_ab_outputs() -> None:
 def render_findings(records: list[dict], state: SidebarState) -> None:
     df = st.session_state.get("findings_df")
     if df is None:
-        df = build_findings_dataframe(records)
+        rules_source = st.session_state.get("rules_effective_path")
+        rules_path = Path(rules_source) if rules_source else state.rules_path
+        df = build_findings_dataframe(records, rules_path=rules_path)
+        st.session_state["findings_df"] = df
     filtered = df
     if state.severity_filter:
         filtered = filtered[filtered["severity"].isin(state.severity_filter)]
@@ -343,7 +355,7 @@ def render_gallery(df: pd.DataFrame, records: list[dict], *, columns: int = 3) -
         for col, (record, thumb_path) in zip(cols, rows[start : start + columns]):
             with col:
                 if thumb_path and thumb_path.exists():
-                    col.image(str(thumb_path), use_column_width=True)
+                    col.image(str(thumb_path), use_container_width=True)
                 else:
                     col.write("(画像なし)")
                 col.caption(
@@ -356,12 +368,15 @@ def get_thumbnail_for_record(record: dict) -> Path | None:
     phash = record.get("phash")
     if not phash:
         return None
-    urls = list(_attachment_urls(record))
-    if not urls:
-        return None
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    image_path = CACHE_DIR / f"{phash}.jpg"
+    local = resolve_local_file(str(phash))
+    image_path = Path(local) if local else (CACHE_DIR / f"{phash}.jpg")
     if not image_path.exists():
+        if SCL_NO_FETCH:
+            return None
+        urls = list(_attachment_urls(record))
+        if not urls:
+            return None
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
         downloaded = download_image(phash, urls, image_path)
         if downloaded is None:
             return None
@@ -414,31 +429,85 @@ def ensure_directories() -> None:
     THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def build_findings_dataframe(records: list[dict]) -> pd.DataFrame:
+def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = None) -> pd.DataFrame:
+    feature_ids = _discover_feature_ids(rules_path) if rules_path else []
+    default_features = [
+        "nsfw_rating_max",
+        "explicit_score",
+        "sexual_intensity",
+        "minor_peak_conf",
+        "minor_body_score",
+        "minor_context_score",
+        "minor_special_score",
+        "gore_peak_conf",
+        "gore_density",
+        "gore_intensity",
+        "animal_presence",
+        "coercion_score",
+    ]
+    present: set[str] = set()
+    for record in records[:50]:
+        metrics = record.get("metrics", {}) or {}
+        dsl = metrics.get("dsl", {}) or {}
+        feats = (dsl.get("features", {}) or {})
+        if isinstance(feats, dict):
+            present.update(key for key in feats.keys() if isinstance(key, str))
+
+    col_features: list[str] = []
+    seen: set[str] = set()
+    for key in default_features + feature_ids + sorted(present):
+        if key and key not in seen:
+            seen.add(key)
+            col_features.append(key)
+
     rows = []
     for record in records:
         metrics = record.get("metrics", {}) or {}
+        dsl = metrics.get("dsl", {}) or {}
+        feats = (dsl.get("features", {}) or {})
         thumb_path = get_thumbnail_for_record(record)
-        rows.append(
-            {
-                "thumbnail": str(thumb_path) if thumb_path else None,
-                "phash": record.get("phash"),
-                "severity": record.get("severity"),
-                "rule_id": record.get("rule_id"),
-                "rule_title": record.get("rule_title"),
-                "message_link": record.get("message_link"),
-                "reasons": "; ".join(record.get("reasons", [])),
-                "exposure_area": metrics.get("exposure_area"),
-                "exposure_count": metrics.get("exposure_count"),
-                "exposure_score": metrics.get("exposure_score"),
-                "nsfw_general_sum": metrics.get("nsfw_general_sum"),
-                "placement_risk": metrics.get("placement_risk")
-                or metrics.get("placement_risk_pre"),
-                "winning_rule": (metrics.get("winning", {}) or {}).get("rule_id"),
-            }
-        )
+        row = {
+            "thumbnail": str(thumb_path) if thumb_path else None,
+            "phash": record.get("phash"),
+            "severity": record.get("severity"),
+            "rule_id": record.get("rule_id"),
+            "rule_title": record.get("rule_title"),
+            "message_link": record.get("message_link"),
+            "reasons": "; ".join(record.get("reasons", [])),
+            "exposure_area": metrics.get("exposure_area"),
+            "exposure_count": metrics.get("exposure_count"),
+            "exposure_score": metrics.get("exposure_score"),
+            "nsfw_general_sum": metrics.get("nsfw_general_sum"),
+            "placement_risk": metrics.get("placement_risk") or metrics.get("placement_risk_pre"),
+            "winning_rule": (metrics.get("winning", {}) or {}).get("rule_id"),
+        }
+        for feature_name in col_features:
+            row[feature_name] = feats.get(feature_name)
+        rows.append(row)
     df = pd.DataFrame(rows)
     return df
+
+
+def _discover_feature_ids(rules_path: Path | None) -> list[str]:
+    if rules_path is None:
+        return []
+    try:
+        data = yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return []
+    features = data.get("features")
+    found: list[str] = []
+    if isinstance(features, dict):
+        for key in features.keys():
+            if isinstance(key, str) and not key.startswith("T_"):
+                found.append(key)
+    elif isinstance(features, list):
+        for item in features:
+            if isinstance(item, dict):
+                identifier = item.get("id")
+                if isinstance(identifier, str) and not identifier.startswith("T_"):
+                    found.append(identifier)
+    return found
 
 
 def _severity_sort_key(series: pd.Series) -> pd.Series:
