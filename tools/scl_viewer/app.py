@@ -103,7 +103,7 @@ def main() -> None:
 
     if "report_df" in st.session_state:
         st.subheader("p3 レポート (CSV)")
-        st.dataframe(st.session_state["report_df"], use_container_width=True)
+        st.dataframe(st.session_state["report_df"], width="stretch")
 
     if "ab_compare" in st.session_state:
         render_ab_outputs()
@@ -413,7 +413,7 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         edited = st.data_editor(
             df_show,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             column_config=column_config,
             disabled=[col for col in df_show.columns if col != "selected"],
             key="scl_findings_editor",
@@ -432,8 +432,6 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             selected_phash = None
         st.session_state["findings_df"] = df
         st.session_state["last_selected_phash"] = selected_phash
-        if len(selected_indices) > 1:
-            st.experimental_rerun()
 
     with right_col:
         selected_record = None
@@ -494,7 +492,7 @@ def render_ab_outputs() -> None:
     diff_df = st.session_state.get("ab_diff_df")
     if diff_df is not None:
         st.subheader("A/B 差分 CSV")
-        st.dataframe(diff_df, use_container_width=True)
+        st.dataframe(diff_df, width="stretch")
     samples = st.session_state.get("ab_samples")
     if samples:
         st.subheader("A/B サンプル")
@@ -594,7 +592,7 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
 
     thumb_path = get_thumbnail_for_record(record)
     if thumb_path and thumb_path.exists():
-        st.image(str(thumb_path), use_container_width=True)
+        st.image(str(thumb_path), width="stretch")
 
     metrics = record.get("metrics", {}) or {}
     ratings = _extract_wd14_rating(record)
@@ -620,9 +618,12 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                 sorted(nude["by_class"].items(), key=lambda item: item[1], reverse=True),
                 columns=["class", "score"],
             )
-            st.dataframe(nude_df, use_container_width=True, hide_index=True)
+            st.dataframe(nude_df, width="stretch", hide_index=True)
 
+    dsl = metrics.get("dsl", {}) or {}
+    feature_values = (dsl.get("features", {}) or {})
     rules_data = _load_rules_for_detail(rules_path)
+    group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
     winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
     if winning_rule_id:
         rule_entry = (rules_data.get("rules") or {}).get(winning_rule_id)
@@ -642,11 +643,7 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                         summary_df["result"] = summary_df["result"].map(
                             lambda flag: "✅" if flag else ("❌" if flag is False else "-")
                         )
-                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-    dsl = metrics.get("dsl", {}) or {}
-    feature_values = (dsl.get("features", {}) or {})
-    group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
+                    st.dataframe(summary_df, width="stretch", hide_index=True)
 
     if feature_values:
         st.subheader("features スコア")
