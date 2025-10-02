@@ -675,7 +675,7 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                                 tooltip=["tag", alt.Tooltip("score:Q", format=".4f")],
                             )
                         )
-                        st.altair_chart(chart, width="stretch")
+                        st.altair_chart(chart)
                 else:
                     st.caption("関連タグのヒットはありません。")
     else:
