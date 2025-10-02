@@ -353,11 +353,6 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
     if df is None:
         df = build_findings_dataframe(records, rules_path=rules_path)
     df = df.copy()
-    if "selected" not in df.columns:
-        df.insert(0, "selected", False)
-    last_selected = st.session_state.get("last_selected_phash")
-    if last_selected and "phash" in df.columns:
-        df.loc[df["phash"] == last_selected, "selected"] = True
 
     filtered = df
     if state.severity_filter and "severity" in filtered.columns:
@@ -383,7 +378,7 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             key="scl_column_preset",
         )
 
-        available_columns = [col for col in filtered.columns if col != "selected"]
+        available_columns = list(filtered.columns)
         default_columns = _default_visible_columns(available_columns, preset)
 
         previous_preset = st.session_state.get("_scl_prev_preset")
@@ -398,40 +393,43 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             key="scl_visible_columns",
         )
         visible_columns = [col for col in visible_columns if col in filtered.columns]
-        df_show = filtered[["selected"] + visible_columns]
+        if not visible_columns:
+            visible_columns = default_columns or available_columns
+        st.session_state["scl_visible_columns"] = visible_columns
+        df_show = filtered[visible_columns]
 
-        column_config: dict[str, Any] = {
-            "selected": st.column_config.CheckboxColumn("選択", help="右ペインに詳細を表示します"),
-        }
+        table_column_config: dict[str, Any] = {}
         if "thumbnail" in df_show.columns:
-            column_config["thumbnail"] = st.column_config.ImageColumn(
+            table_column_config["thumbnail"] = st.column_config.ImageColumn(
                 "thumb",
                 help="p0 添付から生成したサムネイル",
-                width="small",
+                width=120,
             )
 
-        edited = st.data_editor(
-            df_show,
-            hide_index=True,
+        st.dataframe(
+            df_show.reset_index(drop=True),
             width="stretch",
-            column_config=column_config,
-            disabled=[col for col in df_show.columns if col != "selected"],
-            key="scl_findings_editor",
+            column_config=table_column_config,
         )
 
-        edited_selected = edited.get("selected", []) if edited is not None else []
-        selected_flags = [bool(flag) for flag in edited_selected]
-        filtered_indices = list(filtered.index)
-        selected_indices = [idx for idx, flag in zip(filtered_indices, selected_flags) if flag]
-        df.loc[:, "selected"] = False
-        if selected_indices:
-            selected_idx = selected_indices[-1]
-            df.loc[selected_idx, "selected"] = True
-            selected_phash = df.loc[selected_idx, "phash"] if "phash" in df.columns else None
+        selected_phash = None
+        if not filtered.empty and "phash" in filtered.columns:
+            options = filtered["phash"].tolist()
+            default_index = 0
+            stored = st.session_state.get("last_selected_phash")
+            if stored in options:
+                default_index = options.index(stored)
+            selected_phash = st.selectbox(
+                "詳細表示するレコード",
+                options,
+                index=default_index,
+                key="scl_selected_phash",
+            )
+            st.session_state["last_selected_phash"] = selected_phash
         else:
-            selected_phash = None
+            st.session_state["last_selected_phash"] = None
+
         st.session_state["findings_df"] = df
-        st.session_state["last_selected_phash"] = selected_phash
 
     with right_col:
         selected_record = None
@@ -671,7 +669,7 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                                 tooltip=["tag", alt.Tooltip("score:Q", format=".4f")],
                             )
                         )
-                        st.altair_chart(chart, use_container_width=True)
+                        st.altair_chart(chart, width="stretch")
                 else:
                     st.caption("関連タグのヒットはありません。")
     else:
