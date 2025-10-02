@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import yaml
@@ -421,11 +422,11 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         edited_selected = edited.get("selected", []) if edited is not None else []
         selected_flags = [bool(flag) for flag in edited_selected]
         filtered_indices = list(filtered.index)
-        df.loc[:, "selected"] = False
         selected_indices = [idx for idx, flag in zip(filtered_indices, selected_flags) if flag]
+        df.loc[:, "selected"] = False
         if selected_indices:
-            df.loc[selected_indices, "selected"] = True
             selected_idx = selected_indices[-1]
+            df.loc[selected_idx, "selected"] = True
             selected_phash = df.loc[selected_idx, "phash"] if "phash" in df.columns else None
         else:
             selected_phash = None
@@ -658,10 +659,19 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                     continue
                 with st.expander(f"{group_name}（{len(items)}）", expanded=False):
                     df_hits = pd.DataFrame(items, columns=["tag", "score"])
-                    st.dataframe(df_hits, use_container_width=True, hide_index=True)
+                    table_col, chart_col = st.columns((2, 3), gap="medium")
+                    table_col.dataframe(df_hits, use_container_width=True, hide_index=True)
                     if not df_hits.empty:
-                        chart_df = df_hits.head(10).set_index("tag")
-                        st.bar_chart(chart_df)
+                        chart = (
+                            alt.Chart(df_hits.head(20))
+                            .mark_bar()
+                            .encode(
+                                x=alt.X("score:Q", title="score"),
+                                y=alt.Y("tag:N", sort="-x", title="tag"),
+                                tooltip=["tag", alt.Tooltip("score:Q", format=".4f")],
+                            )
+                        )
+                        chart_col.altair_chart(chart, use_container_width=True)
 
 
 def _default_visible_columns(columns: list[str], preset: str) -> list[str]:
@@ -685,15 +695,42 @@ def _format_feature_value(name: str, value: Any) -> str:
 
 def _extract_wd14_rating(record: dict) -> dict[str, float | None]:
     metrics = record.get("metrics", {}) or {}
-    rating = metrics.get("wd14_rating")
-    if isinstance(rating, dict):
-        return {key: _safe_float(rating.get(key)) for key in ("g", "s", "q", "e")}
-    return {
-        "g": _safe_float(metrics.get("general_rating")),
-        "s": _safe_float(metrics.get("sensitive_rating")),
-        "q": _safe_float(metrics.get("questionable")),
-        "e": _safe_float(metrics.get("explicit")),
+    potential_sources: list[dict[str, Any]] = []
+
+    for candidate in (
+        metrics.get("wd14_rating"),
+        (metrics.get("wd14") or {}).get("rating") if isinstance(metrics.get("wd14"), dict) else None,
+        (record.get("wd14") or {}).get("rating") if isinstance(record.get("wd14"), dict) else None,
+    ):
+        if isinstance(candidate, dict):
+            potential_sources.append(candidate)
+
+    key_aliases = {
+        "g": ["g", "general", "general_rating"],
+        "s": ["s", "sensitive", "sensitive_rating"],
+        "q": ["q", "questionable", "rating_questionable"],
+        "e": ["e", "explicit", "rating_explicit"],
     }
+
+    result: dict[str, float | None] = {}
+    for target, aliases in key_aliases.items():
+        value: float | None = None
+        for source in potential_sources:
+            for alias in aliases:
+                if alias in source:
+                    value = _safe_float(source.get(alias))
+                    if value is not None:
+                        break
+            if value is not None:
+                break
+        if value is None:
+            for alias in aliases:
+                candidate = metrics.get(alias)
+                value = _safe_float(candidate)
+                if value is not None:
+                    break
+        result[target] = value
+    return result
 
 
 def _extract_nudenet_metrics(record: dict) -> dict[str, Any]:
