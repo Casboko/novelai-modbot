@@ -432,6 +432,8 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             selected_phash = None
         st.session_state["findings_df"] = df
         st.session_state["last_selected_phash"] = selected_phash
+        if len(selected_indices) > 1:
+            st.experimental_rerun()
 
     with right_col:
         selected_record = None
@@ -620,15 +622,6 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
             )
             st.dataframe(nude_df, use_container_width=True, hide_index=True)
 
-    dsl = metrics.get("dsl", {}) or {}
-    feature_values = (dsl.get("features", {}) or {})
-    if feature_values:
-        with st.expander("features スコア", expanded=True):
-            for name, value in sorted(feature_values.items()):
-                st.write(_format_feature_value(name, value))
-    else:
-        st.info("metrics.dsl.features が見つかりません。v2 ルールで再スキャンすると詳細が表示されます。")
-
     rules_data = _load_rules_for_detail(rules_path)
     winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
     if winning_rule_id:
@@ -651,19 +644,29 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                         )
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
+    dsl = metrics.get("dsl", {}) or {}
+    feature_values = (dsl.get("features", {}) or {})
     group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
-    if group_hits:
-        with st.expander("タググループ × topk（ヒットのみ）", expanded=False):
-            for group_name, items in group_hits.items():
-                if not items:
-                    continue
-                with st.expander(f"{group_name}（{len(items)}）", expanded=False):
-                    df_hits = pd.DataFrame(items, columns=["tag", "score"])
-                    table_col, chart_col = st.columns((2, 3), gap="medium")
-                    table_col.dataframe(df_hits, use_container_width=True, hide_index=True)
-                    if not df_hits.empty:
+
+    if feature_values:
+        st.subheader("features スコア")
+        feature_defs = rules_data.get("features") or {}
+        sorted_features = sorted(
+            feature_values.items(),
+            key=lambda item: (item[1] is None, -float(item[1]) if isinstance(item[1], (int, float)) else 0.0),
+        )
+        for name, value in sorted_features:
+            label = _format_feature_value(name, value)
+            related_groups = _related_groups_for_feature(name, feature_defs, group_hits)
+            with st.expander(label, expanded=False):
+                if related_groups:
+                    for group_name in related_groups:
+                        items = group_hits.get(group_name) or []
+                        if not items:
+                            continue
+                        chart_data = pd.DataFrame(items, columns=["tag", "score"]).head(20)
                         chart = (
-                            alt.Chart(df_hits.head(20))
+                            alt.Chart(chart_data)
                             .mark_bar()
                             .encode(
                                 x=alt.X("score:Q", title="score"),
@@ -671,7 +674,11 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
                                 tooltip=["tag", alt.Tooltip("score:Q", format=".4f")],
                             )
                         )
-                        chart_col.altair_chart(chart, use_container_width=True)
+                        st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.caption("関連タグのヒットはありません。")
+    else:
+        st.info("metrics.dsl.features が見つかりません。v2 ルールで再スキャンすると詳細が表示されます。")
 
 
 def _default_visible_columns(columns: list[str], preset: str) -> list[str]:
@@ -774,6 +781,7 @@ def _load_rules_for_detail(rules_path: Path) -> dict[str, Any]:
 
 
 COMPARISON_PATTERN = re.compile(r"([A-Za-z0-9_.]+)\s*(>=|<=|>|<|==)\s*(T_[A-Za-z0-9_]+|\d+(?:\.\d+)?)")
+GROUP_TOKEN_PATTERN = re.compile(r"'([^']+)'")
 
 
 def _build_when_summary(
@@ -890,6 +898,30 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _related_groups_for_feature(
+    feature_name: str,
+    feature_defs: dict[str, Any],
+    group_hits: dict[str, list[tuple[str, float]]],
+) -> list[str]:
+    expr = feature_defs.get(feature_name)
+    if expr is None:
+        return []
+    if isinstance(expr, str):
+        text = expr
+    else:
+        try:
+            text = json.dumps(expr, ensure_ascii=False)
+        except TypeError:
+            text = str(expr)
+    related: list[str] = []
+    seen: set[str] = set()
+    for token in GROUP_TOKEN_PATTERN.findall(text or ""):
+        if token in group_hits and token not in seen:
+            seen.add(token)
+            related.append(token)
+    return related
 
 
 def _discover_feature_ids(rules_path: Path | None) -> list[str]:
