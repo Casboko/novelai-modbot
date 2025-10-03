@@ -14,6 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import yaml
+from PIL import Image, ImageDraw
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -28,6 +29,8 @@ THUMBS_DIR = Path(os.getenv("SCL_CACHE_THUMBS", "tools/scl_viewer/thumbs"))
 CACHE_ROOT = Path(os.getenv("CACHE_ROOT", "cache"))
 CACHE_DIR = Path(os.getenv("SCL_CACHE_FULL", CACHE_ROOT / "imgs"))
 SCL_NO_FETCH = os.getenv("SCL_NO_FETCH", "0") == "1"
+
+PLACEHOLDER_THUMB = THUMBS_DIR / "_placeholder.jpg"
 
 FINDINGS_PATH = TMP_DIR / "findings.jsonl"
 REPORT_PATH = TMP_DIR / "report.csv"
@@ -72,6 +75,17 @@ def _count_attachments(record: Mapping[str, Any]) -> int:
         attachments = message.get("attachments") or []
         total += len(attachments)
     return total
+
+
+def _ensure_placeholder_thumb() -> Path:
+    PLACEHOLDER_THUMB.parent.mkdir(parents=True, exist_ok=True)
+    if PLACEHOLDER_THUMB.exists():
+        return PLACEHOLDER_THUMB
+    image = Image.new("RGB", (256, 256), (230, 230, 230))
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 116), "no image", fill=(120, 120, 120))
+    image.save(PLACEHOLDER_THUMB, format="JPEG", quality=85)
+    return PLACEHOLDER_THUMB
 DEFAULT_RULES = Path("configs/rules_v2.yaml")
 DEFAULT_THRESHOLDS = Path("configs/scl/scl_thresholds.yaml")
 DEFAULT_ANALYSIS = Path("out/p2/p2_analysis_all.jsonl")
@@ -502,6 +516,40 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
     st.session_state["findings_df"] = df
 
     st.subheader("Findings")
+    thumb_size_options = ["S", "M", "L"]
+    default_thumb_size = st.session_state.get("scl_thumb_size", "M")
+    default_thumb_index = (
+        thumb_size_options.index(default_thumb_size)
+        if default_thumb_size in thumb_size_options
+        else 1
+    )
+    selected_thumb_size = st.radio(
+        "サムネサイズ",
+        thumb_size_options,
+        index=default_thumb_index,
+        horizontal=True,
+        key="scl_thumb_size",
+    )
+    st.session_state["scl_thumb_size"] = selected_thumb_size
+    thumb_width_map = {"S": 96, "M": 128, "L": 160}
+    thumb_px = thumb_width_map.get(selected_thumb_size, 128)
+    row_height = max(thumb_px, 96)
+
+    with st.popover("🔎 クイックプレビュー", use_container_width=True):
+        selected_phash = st.session_state.get("last_selected_phash")
+        if selected_phash:
+            selected_record = next(
+                (rec for rec in records if rec.get("phash") == selected_phash),
+                None,
+            )
+            if selected_record:
+                preview_thumb = get_thumbnail_for_record(selected_record)
+                st.image(str(preview_thumb), width=512)
+            else:
+                st.caption("選択中のレコードが見つかりません。")
+        else:
+            st.caption("行を選択するとプレビューを表示します。")
+
     left_col, right_col = st.columns([5, 3], gap="large")
 
     with left_col:
@@ -537,7 +585,7 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             table_column_config["thumbnail"] = st.column_config.ImageColumn(
                 "thumb",
                 help="p0 添付から生成したサムネイル",
-                width=120,
+                width=thumb_px,
             )
         if "message_link" in df_display.columns:
             table_column_config["message_link"] = st.column_config.LinkColumn("link")
@@ -549,7 +597,7 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             column_config=table_column_config,
             on_select="rerun",
             selection_mode="single-row",
-            row_height=96,
+            row_height=row_height,
         )
 
         selected_rows = getattr(getattr(event, "selection", None), "rows", []) or []
@@ -571,26 +619,32 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         if selected_phash:
             selected_record = next((rec for rec in records if rec.get("phash") == selected_phash), None)
         render_detail_panel(selected_record, rules_path=rules_path)
-def get_thumbnail_for_record(record: dict) -> Path | None:
+def get_thumbnail_for_record(record: dict) -> Path:
     phash = record.get("phash")
     if not phash:
-        return None
+        return _ensure_placeholder_thumb()
+
     local = resolve_local_file(str(phash))
     image_path = Path(local) if local else (CACHE_DIR / f"{phash}.jpg")
+
     if not image_path.exists():
         if SCL_NO_FETCH:
-            return None
+            return _ensure_placeholder_thumb()
         urls = list(_attachment_urls(record))
         if not urls:
-            return None
+            return _ensure_placeholder_thumb()
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         downloaded = download_image(phash, urls, image_path)
         if downloaded is None:
-            return None
+            return _ensure_placeholder_thumb()
+
     thumb_path = THUMBS_DIR / f"{phash}.jpg"
-    if not thumb_path.exists() or thumb_path.stat().st_mtime < image_path.stat().st_mtime:
-        utils.ensure_thumbnail(image_path, thumb_path)
-    return thumb_path
+    try:
+        if (not thumb_path.exists()) or (thumb_path.stat().st_mtime < image_path.stat().st_mtime):
+            utils.ensure_thumbnail(image_path, thumb_path)
+        return thumb_path
+    except Exception:
+        return _ensure_placeholder_thumb()
 
 
 def download_image(identifier: str, urls: Iterable[str], dest: Path) -> Path | None:
@@ -634,6 +688,7 @@ def render_ab_outputs() -> None:
 def ensure_directories() -> None:
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_placeholder_thumb()
 
 
 def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = None) -> pd.DataFrame:
@@ -736,13 +791,52 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
         st.info("左の表で行を選択すると詳細を表示します。")
         return
 
-    severity = record.get("severity") or "-"
+    metrics = record.get("metrics", {}) or {}
+    severity = (record.get("severity") or "-").upper()
     rule_id = record.get("rule_id") or "-"
-    rule_title = record.get("rule_title")
-    summary_parts = [f"Severity: {severity}", f"Rule: {rule_id}"]
-    if rule_title:
-        summary_parts.append(rule_title)
-    st.markdown(" | ".join(summary_parts))
+    rule_title = record.get("rule_title") or "-"
+    header_parts = ["🚩", severity]
+    if rule_id != "-":
+        header_parts.append(f"· {rule_id}")
+    if rule_title and rule_title != "-":
+        header_parts.append(f"— {rule_title}")
+    st.markdown(" ".join(header_parts))
+
+    ratings = _extract_wd14_rating(record)
+    nude = _extract_nudenet_metrics(record)
+    dsl_block = (metrics.get("dsl") or {}) if isinstance(metrics.get("dsl"), Mapping) else {}
+    dsl_features = (dsl_block.get("features") or {}) if isinstance(dsl_block, Mapping) else {}
+    feature_values = (dsl_features if isinstance(dsl_features, dict) else {}) or {}
+    rules_data = _load_rules_for_detail(rules_path)
+
+    winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
+    when_clause: str | None = None
+    when_summary_rows: list[dict[str, Any]] = []
+    if winning_rule_id:
+        rule_entry = (rules_data.get("rules") or {}).get(winning_rule_id)
+        when_candidate = rule_entry.get("when") if rule_entry else None
+        if when_candidate:
+            when_clause = when_candidate
+            when_summary_rows = _build_when_summary(
+                when_clause,
+                record,
+                feature_values,
+                rules_data.get("features") or {},
+            )
+
+    pass_count = sum(1 for row in when_summary_rows if row.get("result") is True)
+    fail_count = sum(1 for row in when_summary_rows if row.get("result") is False)
+    none_count = sum(1 for row in when_summary_rows if row.get("result") is None)
+
+    exposure_value = _safe_float(metrics.get("exposure_area"))
+    exposure_display = "-" if exposure_value is None else f"{exposure_value:.3f}"
+    explicit_value = _safe_float(ratings.get("e"))
+    explicit_display = "-" if explicit_value is None else f"{explicit_value:.3f}"
+
+    kpi_cols = st.columns(3)
+    kpi_cols[0].metric("exposure_area", exposure_display)
+    kpi_cols[1].metric("wd14: explicit (e)", explicit_display)
+    kpi_cols[2].metric("when summary", f"✅{pass_count} / ❌{fail_count} / −{none_count}")
 
     reasons = record.get("reasons") or []
     if reasons:
@@ -753,14 +847,8 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
         st.markdown(f"[Message Link]({message_link})")
 
     thumb_path = get_thumbnail_for_record(record)
-    if thumb_path and thumb_path.exists():
+    if thumb_path.exists():
         st.image(str(thumb_path), width="stretch")
-
-    metrics = record.get("metrics", {}) or {}
-    ratings = _extract_wd14_rating(record)
-    nude = _extract_nudenet_metrics(record)
-    dsl_block = (metrics.get("dsl") or {}) if isinstance(metrics.get("dsl"), Mapping) else {}
-    dsl_features = (dsl_block.get("features") or {}) if isinstance(dsl_block, Mapping) else {}
 
     rating_cols = st.columns(4)
     rating_labels = {"g": "wd14:g", "s": "wd14:s", "q": "wd14:q", "e": "wd14:e"}
@@ -789,30 +877,19 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
             )
             st.dataframe(nude_df, width="stretch", hide_index=True)
 
-    dsl = metrics.get("dsl", {}) or {}
-    feature_values = (dsl.get("features", {}) or {})
-    rules_data = _load_rules_for_detail(rules_path)
     group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
-    winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
-    if winning_rule_id:
-        rule_entry = (rules_data.get("rules") or {}).get(winning_rule_id)
-        if rule_entry and rule_entry.get("when"):
-            with st.expander(f"ルール {winning_rule_id} の when 式", expanded=True):
-                when_clause = rule_entry.get("when")
-                st.code(when_clause, language="text")
-                when_summary = _build_when_summary(
-                    when_clause,
-                    record,
-                    feature_values,
-                    rules_data.get("features") or {},
-                )
-                if when_summary:
-                    summary_df = pd.DataFrame(when_summary)
-                    if "result" in summary_df.columns:
-                        summary_df["result"] = summary_df["result"].map(
-                            lambda flag: "✅" if flag else ("❌" if flag is False else "-")
-                        )
-                    st.dataframe(summary_df, width="stretch", hide_index=True)
+    if winning_rule_id and when_clause:
+        with st.expander(f"ルール {winning_rule_id} の when 式", expanded=True):
+            st.code(when_clause, language="text")
+            if when_summary_rows:
+                summary_df = pd.DataFrame(when_summary_rows)
+                if "result" in summary_df.columns:
+                    summary_df["result"] = summary_df["result"].map(
+                        lambda flag: "✅" if flag else ("❌" if flag is False else "-")
+                    )
+                st.dataframe(summary_df, width="stretch", hide_index=True)
+            else:
+                st.caption("when 式で比較可能なメトリクスが見つかりません。")
 
     if feature_values:
         st.subheader("features スコア")
