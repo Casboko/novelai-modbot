@@ -43,6 +43,7 @@ FEATURE_TO_EXPORT: Mapping[str, str] = {
     "gore_peak": "gore_max",
     "gore_max": "gore_max",
     "drug_score": "drug_score",
+    "qe_margin": "qe_margin",
 }
 
 
@@ -178,6 +179,9 @@ class DslEvaluator:
             is_spoiler=context.is_spoiler,
             attachment_count=context.attachment_count,
         )
+
+        for key, value in self._program.const_map.items():
+            runtime.namespace[key] = float(value)
 
         evaluator = SafeEvaluator(runtime.namespace, policy=self._program._policy)
 

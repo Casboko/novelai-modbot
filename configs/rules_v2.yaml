@@ -616,24 +616,31 @@ features:
     gt=0.35), 0, 2) * 0.5 + clamp(max('unconscious_states') / 0.2, 0, 1) * 0.5 + clamp(count('pain_expressions',
     gt=0.2) / 2, 0, 1) * 0.5 + clamp(topk_sum('restraint_gear', k=3, gt=0.2) / 0.6,
     0, 1) * 0.5
-  rating_is_explicit: rating.explicit >= 0.20
-  rating_is_questionable: rating.questionable >= 0.35
+  rating_is_explicit: rating.explicit >= const_WD14_EXPL
+  rating_is_questionable: rating.questionable >= const_WD14_QUES
   rating_is_qplus: rating_is_explicit || rating_is_questionable
-  is_Qplus: (rating.explicit >= 0.20) || (rating.questionable >= 0.35)
+  is_Qplus: (rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)
+  qe_margin: max(
+    rating.questionable - const_WD14_QUES,
+    rating.explicit - const_WD14_EXPL
+  )
+  is_low_margin: qe_margin < const_LOW_MARGIN
   bestiality_peak: max('bestiality_direct')
   coercion_main_peak: max('coercion_main')
   uncon_peak: max('unconscious_states')
   pain_peak: max('pain_expressions')
   sec_peak: max(uncon_peak, pain_peak)
-  base_strength: clamp((coercion_main_peak / 0.55) * (sec_peak / 0.55), 0, 1)
+  base_strength: clamp((coercion_main_peak / const_COERCION_PAIR) * (sec_peak / const_COERCION_PAIR),
+    0, 1)
   sub_cnt: count('coercion_sub', gt=0.50)
   rest_topk: topk_sum('restraint_gear', k=3, gt=0.50)
   offset_strength: clamp((sub_cnt * 0.12) + ((rest_topk / 1.50) * 0.18), 0, 0.30)
   coercion_final_score: clamp(base_strength + offset_strength, 0, 1)
-  is_E: rating.explicit >= 0.20
-  is_Q: rating.questionable >= 0.35
+  coercion_org_threshold: const_COERCION_ORG + (0.03 if is_low_margin else 0.0)
+  is_E: rating.explicit >= const_WD14_EXPL
+  is_Q: rating.questionable >= const_WD14_QUES
   sexual_main: topk_sum('sexual_act_lexicon', k=3, gt=0.50)
-  exposure_prominent: exposure_area >= 0.20
+  exposure_prominent: exposure_area >= const_EXPOSURE_HIGH
   is_explicit_exposed: nude.has('FEMALE_GENITALIA_EXPOSED') || nude.has('MALE_GENITALIA_EXPOSED') || nude.has('ANUS_EXPOSED') || nude.has('FEMALE_BREAST_EXPOSED')
   minor_peak_conf: max('minor_peak')
   minor_main_peak: max('minor_peak')
@@ -653,28 +660,31 @@ features:
   injury_topk: topk_sum('injury_tags', k=3, gt=0.35)
   blood_topk: topk_sum('blood_tags', k=3, gt=0.35)
   gore_density_cnt: count('injury_tags', gt=0.35) + count('blood_tags', gt=0.35)
-  gore_heavy_gate: (gore_main_peak >= 0.30) && (gore_density_cnt >= 4) && ((injury_topk >= 0.70) || (blood_topk >= 0.70))
-  t_main: clamp(gore_main_peak / 0.30, 0, 1)
-  t_dense: clamp(gore_density_cnt / 4.0, 0, 1)
-  t_int: max(clamp(injury_topk / 0.70, 0, 1), clamp(blood_topk / 0.70, 0, 1))
+  gore_heavy_gate: (gore_main_peak >= const_GORE_MAIN) && (gore_density_cnt >= const_GORE_DENSITY) && ((injury_topk >= const_GORE_TOPK) || (blood_topk >= const_GORE_TOPK))
+  t_main: clamp(gore_main_peak / const_GORE_MAIN, 0, 1)
+  t_dense: clamp(gore_density_cnt / const_GORE_DENSITY, 0, 1)
+  t_int: max(clamp(injury_topk / const_GORE_TOPK, 0, 1), clamp(blood_topk / const_GORE_TOPK,
+    0, 1))
   gore_base_score: clamp(t_main * t_dense * t_int, 0, 1) * 0.60
   death_cnt: count('death_markers', gt=0.35)
   pain_cnt: count('pain_expressions', gt=0.35)
   gore_offset: clamp(death_cnt * 0.20 + pain_cnt * 0.10, 0, 0.40)
   gore_final_score: clamp(gore_base_score + gore_offset, 0, 1)
+  gore_org_threshold: const_GORE_ORG + (0.03 if is_low_margin else 0.0)
+  gore_red_threshold: const_GORE_RED + (0.03 if is_low_margin else 0.0)
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
 rules:
 - id: C-ORG-QUES-STRICT-001
   severity: orange
   priority: 85
-  when: is_Qplus && (coercion_final_score >= 0.95)
+  when: is_Qplus && (coercion_final_score >= coercion_org_threshold)
   reasons:
-  - "coercion_main={coercion_main_peak:.2f}"
-  - "sec_peak={sec_peak:.2f}"
-  - "offset=sub_cnt:{sub_cnt}, rest_topk:{rest_topk:.2f}"
+  - "main={coercion_main_peak:.2f}"
+  - "sec={sec_peak:.2f}"
+  - "offset=sub:{sub_cnt},rest:{rest_topk:.2f}"
   - "final={coercion_final_score:.2f}"
-  - "rating=q_plus"
+  - "rating=max({rating.questionable:.2f},{rating.explicit:.2f})"
   stop: true
 # 旧 C-RED-001 は v2.1 で無効化（合算＋RED判定を撤廃）
 # - id: C-RED-001
@@ -707,77 +717,79 @@ rules:
 - id: A-RED-EXPL-001
   severity: red
   priority: 97
-  when: (minor_main_peak >= 0.30) && rating_is_explicit
+  when: (minor_main_peak >= const_MINOR_MAIN) && rating_is_explicit
   reasons:
-  - minor_main={minor_main_peak:.2f}
-  - rating=explicit
+  - "minor_main={minor_main_peak:.2f}"
+  - "rating=explicit({rating.explicit:.2f})"
   stop: true
 - id: A-ORG-QUES-001
   severity: orange
   priority: 96
-  when: (minor_main_peak >= 0.30) && rating_is_questionable
+  when: (minor_main_peak >= const_MINOR_MAIN) && rating_is_questionable
   reasons:
-  - minor_main={minor_main_peak:.2f}
-  - rating=questionable
+  - "minor_main={minor_main_peak:.2f}"
+  - "rating=questionable({rating.questionable:.2f})"
   stop: true
 - id: A-RED-SIT-H-QPLUS-001
   severity: red
   priority: 95
-  when: (minor_sit_high_peak >= 0.30) && rating_is_qplus
+  when: (minor_sit_high_peak >= const_MINOR_MAIN) && rating_is_qplus
   reasons:
-  - minor_sit_high={minor_sit_high_peak:.2f}
-  - rating=q_plus
+  - "minor_sit_high={minor_sit_high_peak:.2f}"
+  - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   stop: true
 - id: A-RED-EXPL-SIT-O-001
   severity: red
   priority: 94
-  when: (minor_sit_other_peak >= 0.30) && rating_is_explicit
+  when: (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_explicit
   reasons:
-  - minor_sit_other={minor_sit_other_peak:.2f}
-  - rating=explicit
+  - "minor_sit_other={minor_sit_other_peak:.2f}"
+  - "rating=explicit({rating.explicit:.2f})"
   stop: true
 - id: A-ORG-QUES-SIT-O-001
   severity: orange
   priority: 93
-  when: (minor_sit_other_peak >= 0.30) && rating_is_questionable
+  when: (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_questionable
   reasons:
-  - minor_sit_other={minor_sit_other_peak:.2f}
-  - rating=questionable
+  - "minor_sit_other={minor_sit_other_peak:.2f}"
+  - "rating=questionable({rating.questionable:.2f})"
   stop: true
 - id: A-ORG-EXPL-SUS-001
   severity: orange
   priority: 92
-  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= 0.60) && rating_is_explicit
+  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_E) && rating_is_explicit
   reasons:
-  - minor_suspect_score={minor_suspect_score:.2f}
-  - seed={minor_suspect_seed:.2f}
-  - rating=explicit
+  - "minor_suspect={minor_suspect_score:.2f}"
+  - "seed={minor_suspect_seed:.2f}"
+  - "rating=explicit({rating.explicit:.2f})"
   stop: true
 - id: A-YEL-QUES-SUS-001
   severity: yellow
   priority: 91
-  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= 0.45) && rating_is_questionable
+  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_Q) && rating_is_questionable
   reasons:
-  - minor_suspect_score={minor_suspect_score:.2f}
-  - seed={minor_suspect_seed:.2f}
-  - rating=questionable
+  - "minor_suspect={minor_suspect_score:.2f}"
+  - "seed={minor_suspect_seed:.2f}"
+  - "rating=questionable({rating.questionable:.2f})"
   stop: true
 - id: B-RED-NSFW-EXPL-001
   severity: red
   priority: 76
   when: (!channel.is_nsfw) && is_E
   reasons:
-  - "rating=explicit({rating.explicit:.2f})"
+  - "explicit={rating.explicit:.2f}"
   stop: true
 - id: B-ORG-NSFW-QUES-STRICT-001
   severity: orange
   priority: 75
-  when: (!channel.is_nsfw) && is_Q && exposure_prominent && (sexual_main >= 0.60) && is_explicit_exposed
+  when: (!channel.is_nsfw) && is_Q && exposure_prominent && (sexual_main >= const_SEXUAL_MAIN_STRONG) && is_explicit_exposed && !is_low_margin
   reasons:
-  - "rating=questionable({rating.questionable:.2f})"
-  - "exposure_prominent={exposure_prominent}"
+  - "explicit={rating.explicit:.2f}"
+  - "q={rating.questionable:.2f}"
+  - "exposure={exposure_area:.2f}"
   - "sexual_main={sexual_main:.2f}"
   - "explicit_exposed={is_explicit_exposed}"
+  - "qe_margin={qe_margin:.3f}"
   stop: true
 # 旧 B-RED-NSFW-001 / B-ORG-001 は v2.1 で無効化（ExplicitのみをREDとし、Q/Sは基本GREEN）
 # - id: B-RED-NSFW-001
@@ -800,18 +812,19 @@ rules:
 - id: D-RED-SEX-GORE-STRICT-001
   severity: red
   priority: 78
-  when: gore_heavy_gate && (gore_final_score >= 0.85) && (is_E || sexual_main >= 0.60)
+  when: gore_heavy_gate && (gore_final_score >= gore_red_threshold) && (is_E || sexual_main >= const_SEXUAL_MAIN_STRONG)
   reasons:
-  - "gate main={gore_main_peak:.2f} dense={gore_density_cnt} int=max({injury_topk:.2f},{blood_topk:.2f})"
+  - "gate(main={gore_main_peak:.2f},dense={gore_density_cnt:.0f},int=max({injury_topk:.2f},{blood_topk:.2f}))"
   - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
-  - "sexual_main={sexual_main:.2f} explicit={rating.explicit:.2f}"
+  - "sexual_main={sexual_main:.2f}"
+  - "explicit={rating.explicit:.2f}"
   stop: true
 - id: D-ORG-GORE-STRICT-001
   severity: orange
   priority: 67
-  when: gore_heavy_gate && (gore_final_score >= 0.70)
+  when: gore_heavy_gate && (gore_final_score >= gore_org_threshold)
   reasons:
-  - "gate main={gore_main_peak:.2f} dense={gore_density_cnt} int=max({injury_topk:.2f},{blood_topk:.2f})"
+  - "gate(main={gore_main_peak:.2f},dense={gore_density_cnt:.0f},int=max({injury_topk:.2f},{blood_topk:.2f}))"
   - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
   stop: true
 # 旧 D-RED-001 / D-ORG-001 は v2.1 で無効化（重ゴアANDゲートへ移行）
@@ -833,28 +846,29 @@ rules:
 - id: E-RED-QPLUS-BEST-001
   severity: red
   priority: 79
-  when: is_Qplus && (bestiality_peak >= 0.20)
+  when: is_Qplus && (bestiality_peak >= const_BESTIALITY)
   reasons:
   - "bestiality={bestiality_peak:.2f}"
-  - "rating=q_plus"
+  - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   stop: true
 - id: E-ORG-QPLUS-SUS-001
   severity: orange
   priority: 78
-  when: is_Qplus && (animal_presence >= 0.35) && ((sexual_main >= 0.60) || is_explicit_exposed)
+  when: is_Qplus && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
   reasons:
-  - "animal_presence={animal_presence:.2f}"
+  - "bestiality={bestiality_peak:.2f}"
+  - "presence={animal_presence:.2f}"
   - "sexual_main={sexual_main:.2f}"
   - "explicit_exposed={is_explicit_exposed}"
-  - "rating=q_plus"
+  - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   stop: true
 - id: E-YEL-QPLUS-PRES-001
   severity: yellow
   priority: 77
-  when: is_Qplus && (animal_presence >= 0.35)
+  when: is_Qplus && (animal_presence >= const_ANIMAL_PRES)
   reasons:
-  - "animal_presence={animal_presence:.2f}"
-  - "rating=q_plus"
+  - "presence={animal_presence:.2f}"
+  - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   stop: true
 # 旧 E-RED-001 / E-YEL-001 は v2.1 で無効化（名指しRED / 存在YEL / 疑いORGへ置換）
 # - id: E-RED-001

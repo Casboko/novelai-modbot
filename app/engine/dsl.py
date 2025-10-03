@@ -242,14 +242,29 @@ class DslEvaluationInput:
 
 
 class DslProgram:
-    def __init__(self, *, features: Sequence[CompiledFeature], rules: Sequence[CompiledRule], groups: Mapping[str, Sequence[str]], policy: DslPolicy) -> None:
+    def __init__(
+        self,
+        *,
+        features: Sequence[CompiledFeature],
+        rules: Sequence[CompiledRule],
+        groups: Mapping[str, Sequence[str]],
+        policy: DslPolicy,
+        const_map: Mapping[str, float] | None = None,
+    ) -> None:
         self._features = tuple(features)
         self._rules = tuple(rules)
         self._groups = dict(groups)
         self._policy = policy
+        self._const_map = dict(const_map or {})
 
     @classmethod
-    def from_config(cls, config: RuleConfigV2 | None, policy: DslPolicy) -> "DslProgram":
+    def from_config(
+        cls,
+        config: RuleConfigV2 | None,
+        policy: DslPolicy,
+        *,
+        const_map: Mapping[str, float] | None = None,
+    ) -> "DslProgram":
         if config is None:
             raise ValueError("config must not be None")
 
@@ -291,7 +306,13 @@ class DslProgram:
         if not compiled_rules:
             raise ValueError("no valid DSL rules were compiled")
 
-        return cls(features=compiled_features, rules=compiled_rules, groups=config.groups, policy=policy)
+        return cls(
+            features=compiled_features,
+            rules=compiled_rules,
+            groups=config.groups,
+            policy=policy,
+            const_map=const_map,
+        )
 
     def evaluate(self, inputs: DslEvaluationInput) -> DslEvaluationOutcome | None:
         runtime = build_context(
@@ -305,6 +326,8 @@ class DslProgram:
             attachment_count=inputs.attachment_count,
         )
         namespace = runtime.namespace
+        for key, value in self._const_map.items():
+            namespace[key] = float(value)
         evaluator = SafeEvaluator(namespace, policy=self._policy)
 
         feature_values: dict[str, Any] = {}
@@ -387,6 +410,10 @@ class DslProgram:
     @property
     def compiled_rules(self) -> tuple[CompiledRule, ...]:
         return self._rules
+
+    @property
+    def const_map(self) -> Mapping[str, float]:
+        return self._const_map
 
 
 def _compile_reason(template: str) -> ReasonTemplate:

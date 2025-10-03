@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .engine.loader import load_const_overrides_from_path
 from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 from .triage import run_scan
@@ -71,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Strip attachment URLs from findings output",
     )
+    parser.add_argument(
+        "--const",
+        type=Path,
+        help="Path to const override file (YAML/JSON) applied after rules thresholds",
+    )
     return parser.parse_args()
 
 
@@ -96,8 +102,12 @@ def main() -> None:
         sys.exit(2)
 
     engine = None
+    const_overrides = None
+    if args.const:
+        loaded = load_const_overrides_from_path(args.const)
+        const_overrides = loaded or None
     if not is_legacy:
-        engine = RuleEngine(str(args.rules), policy=policy)
+        engine = RuleEngine(str(args.rules), policy=policy, const_overrides=const_overrides)
         if args.print_config:
             print(engine.describe_config())
         if not args.quiet:

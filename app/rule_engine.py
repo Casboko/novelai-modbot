@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from .engine.dsl import DslProgram
 from .engine.evaluator import DslEvaluator
-from .engine.loader import load_rule_config
+from .engine.loader import build_const_map, load_rule_config
 from .engine.tag_norm import normalize_tag
 from .engine.types import DslPolicy, RuleConfigV2
 
@@ -29,6 +29,7 @@ class RuleEngine:
         *,
         policy: DslPolicy | None = None,
         nudenet_config_path: str | None = None,  # legacy互換のため受け取るが未使用
+        const_overrides: Mapping[str, float] | None = None,
     ) -> None:
         rules_path = Path(config_path or DEFAULT_RULES_PATH)
         _ = nudenet_config_path  # kept for compatibility
@@ -46,7 +47,13 @@ class RuleEngine:
         except (TypeError, ValueError):
             self._rules_version = None
 
-        self._program = DslProgram.from_config(dsl_config, self.policy)
+        rule_thresholds = raw_config.get("thresholds") if isinstance(raw_config.get("thresholds"), Mapping) else {}
+        self.const_map = build_const_map(
+            rule_thresholds=rule_thresholds,
+            extra_overrides=const_overrides,
+        )
+
+        self._program = DslProgram.from_config(dsl_config, self.policy, const_map=self.const_map)
         self._evaluator = DslEvaluator(self._program)
 
         rule_titles = raw_config.get("rule_titles") if isinstance(raw_config.get("rule_titles"), Mapping) else {}

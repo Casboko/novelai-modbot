@@ -3,7 +3,9 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-from app.engine.loader import load_rules_result
+import yaml
+
+from app.engine.loader import build_const_map, load_const_overrides_from_path, load_rules_result
 
 
 def _write_yaml(tmp_path: Path, content: str) -> Path:
@@ -65,7 +67,7 @@ def test_cli_override_mode_priority(tmp_path: Path) -> None:
 def test_unknown_keys_warn(tmp_path: Path) -> None:
     yaml_text = _base_rules_yaml(
         """
-        thresholds:
+        unexpected:
           sample: 0.5
         """
     )
@@ -79,13 +81,68 @@ def test_unknown_keys_warn(tmp_path: Path) -> None:
 def test_unknown_keys_strict_error(tmp_path: Path) -> None:
     yaml_text = _base_rules_yaml(
         """
-        thresholds:
+        unexpected:
           sample: 0.5
         """
     )
     path = _write_yaml(tmp_path, yaml_text)
     result = load_rules_result(path, override_mode="strict")
     assert result.status == "error"
+
+
+def test_thresholds_block_is_accepted(tmp_path: Path) -> None:
+    yaml_text = _base_rules_yaml(
+        """
+        thresholds:
+          wd14_explicit: 0.25
+          wd14_questionable: 0.45
+        """
+    )
+    path = _write_yaml(tmp_path, yaml_text)
+    result = load_rules_result(path)
+    assert result.status == "ok"
+    assert result.counts["unknown_keys"] == 0
+    assert result.config is not None
+    thresholds = result.config.raw.get("thresholds")
+    assert isinstance(thresholds, dict)
+    assert thresholds.get("wd14_explicit") == 0.25
+
+
+def test_build_const_map_applies_rule_and_extra_overrides(tmp_path: Path) -> None:
+    rule_overrides = {"wd14_explicit": 0.22, "gore": {"red": 0.90}}
+    extra = {"const_WD14_EXPL": 0.30, "const_LOW_MARGIN": 0.05}
+    scl_path = tmp_path / "scl.yaml"
+    scl_path.write_text("gore:\n  org: 0.65\n", encoding="utf-8")
+
+    consts = build_const_map(
+        rule_thresholds=rule_overrides,
+        extra_overrides=extra,
+        scl_thresholds_path=scl_path,
+    )
+
+    # defaults exist
+    assert consts["const_WD14_QUES"] == 0.35
+    # rule override applied before extra override
+    assert consts["const_WD14_EXPL"] == 0.30
+    # scl override applied when not defined by extra
+    assert consts["const_GORE_ORG"] == 0.65
+    # rule override for nested key applied
+    assert consts["const_GORE_RED"] == 0.90
+    # extra override applied
+    assert consts["const_LOW_MARGIN"] == 0.05
+
+
+def test_load_const_overrides_from_path_supports_direct_const(tmp_path: Path) -> None:
+    payload = {
+        "const_WD14_EXPL": 0.33,
+        "thresholds": {"gore": {"org": 0.66}},
+    }
+    path = tmp_path / "const.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    overrides = load_const_overrides_from_path(path)
+    assert overrides["const_WD14_EXPL"] == 0.33
+    assert overrides["const_GORE_ORG"] == 0.66
 
 
 def test_rule_titles_must_cover_rules(tmp_path: Path) -> None:

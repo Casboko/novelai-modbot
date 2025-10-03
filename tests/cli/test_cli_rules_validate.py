@@ -53,6 +53,8 @@ def test_cli_rules_validate_strict_error(tmp_path: Path, monkeypatch: pytest.Mon
         groups: {}
         features: {}
         thresholds: {}
+        unexpected:
+          sample: 1
         rules:
           - id: TEST
             severity: red
@@ -111,6 +113,8 @@ def test_cli_rules_treat_warnings_as_errors(tmp_path: Path, monkeypatch: pytest.
         groups: {}
         features: {}
         thresholds: {}
+        unexpected:
+          sample: 1
         rules:
           - id: TEST
             severity: green

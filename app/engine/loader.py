@@ -21,12 +21,175 @@ from .types import (
     ValidationIssue,
 )
 
-__all__ = ["load_rules_result", "load_rule_config"]
+__all__ = [
+    "load_rules_result",
+    "load_rule_config",
+    "build_const_map",
+    "extract_const_overrides",
+    "load_const_overrides_from_path",
+]
 
-_ALLOWED_KEYS = {"version", "dsl_mode", "rule_titles", "groups", "features", "rules"}
+_ALLOWED_KEYS = {"version", "dsl_mode", "rule_titles", "groups", "features", "rules", "thresholds"}
 _GROUP_FUNCS = {"sum", "max", "any", "count", "topk_sum"}
 _ALLOWED_FUNCTIONS = list_builtin_functions()
 _BASE_IDENTIFIERS = list_builtin_identifiers() | {"rating", "channel", "message", "nude", "attachment_count", "metrics"}
+
+
+def _load_yaml(path: str | Path) -> dict[str, Any]:
+    try:
+        with Path(path).open("r", encoding="utf-8") as fp:
+            data = yaml.safe_load(fp) or {}
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {}
+    if isinstance(data, Mapping):
+        return dict(data)
+    return {}
+
+
+def _flatten_thresholds(payload: Mapping[str, Any] | None, prefix: str = "") -> dict[str, float]:
+    if not isinstance(payload, Mapping):
+        return {}
+    flattened: dict[str, float] = {}
+    for key, value in payload.items():
+        merged_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            flattened.update(_flatten_thresholds(value, merged_key))
+        elif isinstance(value, (int, float)):
+            flattened[merged_key] = float(value)
+    return flattened
+
+
+THRESHOLD_TO_CONST: dict[str, str] = {
+    "wd14_questionable": "const_WD14_QUES",
+    "wd14_explicit": "const_WD14_EXPL",
+    "const.wd14.questionable": "const_WD14_QUES",
+    "const.wd14.explicit": "const_WD14_EXPL",
+    "exposure.area.mid": "const_EXPOSURE_MID",
+    "exposure.area.high": "const_EXPOSURE_HIGH",
+    "const.exposure.area.mid": "const_EXPOSURE_MID",
+    "const.exposure.area.high": "const_EXPOSURE_HIGH",
+    "sexual.main.strong": "const_SEXUAL_MAIN_STRONG",
+    "const.sexual.main.strong": "const_SEXUAL_MAIN_STRONG",
+    "low_margin": "const_LOW_MARGIN",
+    "const.low_margin": "const_LOW_MARGIN",
+    "minor.main": "const_MINOR_MAIN",
+    "const.minor.main": "const_MINOR_MAIN",
+    "suspect.explicit": "const_SUSPECT_E",
+    "suspect.questionable": "const_SUSPECT_Q",
+    "const.suspect.explicit": "const_SUSPECT_E",
+    "const.suspect.questionable": "const_SUSPECT_Q",
+    "coercion.pair": "const_COERCION_PAIR",
+    "coercion.org": "const_COERCION_ORG",
+    "const.coercion.pair": "const_COERCION_PAIR",
+    "const.coercion.org": "const_COERCION_ORG",
+    "bestiality.direct": "const_BESTIALITY",
+    "bestiality.direct_gate": "const_BESTIALITY",
+    "const.bestiality.direct": "const_BESTIALITY",
+    "animal.presence": "const_ANIMAL_PRES",
+    "animal.presence_gate": "const_ANIMAL_PRES",
+    "const.animal.presence": "const_ANIMAL_PRES",
+    "gore.main": "const_GORE_MAIN",
+    "gore.main_gate": "const_GORE_MAIN",
+    "const.gore.main": "const_GORE_MAIN",
+    "gore.density": "const_GORE_DENSITY",
+    "gore.density_gate": "const_GORE_DENSITY",
+    "const.gore.density": "const_GORE_DENSITY",
+    "gore.topk": "const_GORE_TOPK",
+    "gore.topk_gate": "const_GORE_TOPK",
+    "const.gore.topk": "const_GORE_TOPK",
+    "gore.org": "const_GORE_ORG",
+    "gore.org_gate": "const_GORE_ORG",
+    "const.gore.org": "const_GORE_ORG",
+    "gore.red": "const_GORE_RED",
+    "gore.red_gate": "const_GORE_RED",
+    "const.gore.red": "const_GORE_RED",
+}
+
+
+DEFAULT_CONSTS: dict[str, float] = {
+    "const_WD14_EXPL": 0.20,
+    "const_WD14_QUES": 0.35,
+    "const_EXPOSURE_MID": 0.15,
+    "const_EXPOSURE_HIGH": 0.20,
+    "const_SEXUAL_MAIN_STRONG": 0.60,
+    "const_LOW_MARGIN": 0.10,
+    "const_MINOR_MAIN": 0.30,
+    "const_SUSPECT_E": 0.60,
+    "const_SUSPECT_Q": 0.45,
+    "const_COERCION_PAIR": 0.55,
+    "const_COERCION_ORG": 0.95,
+    "const_BESTIALITY": 0.20,
+    "const_ANIMAL_PRES": 0.35,
+    "const_GORE_MAIN": 0.30,
+    "const_GORE_DENSITY": 4.0,
+    "const_GORE_TOPK": 0.70,
+    "const_GORE_ORG": 0.70,
+    "const_GORE_RED": 0.85,
+}
+
+
+def extract_const_overrides(thresholds: Mapping[str, Any] | None) -> dict[str, float]:
+    overrides: dict[str, float] = {}
+    for dotted_key, numeric in _flatten_thresholds(thresholds).items():
+        mapped = THRESHOLD_TO_CONST.get(dotted_key)
+        if mapped:
+            overrides[mapped] = numeric
+    return overrides
+
+
+def _load_scl_thresholds(path: str | Path) -> Mapping[str, Any]:
+    return _load_yaml(path)
+
+
+def build_const_map(
+    *,
+    rule_thresholds: Mapping[str, Any] | None = None,
+    extra_overrides: Mapping[str, float] | None = None,
+    scl_thresholds_path: str | Path = "configs/scl/scl_thresholds.yaml",
+) -> dict[str, float]:
+    consts = dict(DEFAULT_CONSTS)
+
+    scl_payload = _load_scl_thresholds(scl_thresholds_path)
+    consts.update(extract_const_overrides(scl_payload))
+
+    if rule_thresholds:
+        consts.update(extract_const_overrides(rule_thresholds))
+
+    if extra_overrides:
+        for key, value in extra_overrides.items():
+            if key.startswith("const_"):
+                try:
+                    consts[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+
+    return consts
+
+
+def load_const_overrides_from_path(path: str | Path) -> dict[str, float]:
+    payload = _load_yaml(path)
+    if not payload:
+        return {}
+
+    overrides: dict[str, float] = {}
+    for key, value in payload.items():
+        if not key.startswith("const_"):
+            continue
+        try:
+            overrides[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    thresholds_payload = None
+    if isinstance(payload.get("thresholds"), Mapping):
+        thresholds_payload = payload["thresholds"]  # type: ignore[assignment]
+    else:
+        thresholds_payload = payload
+
+    overrides.update(extract_const_overrides(thresholds_payload))
+    return overrides
 
 
 @dataclass(slots=True)
@@ -290,7 +453,9 @@ def load_rules_result(
         )
         logger.debug("dsl loader: group pattern collisions=%d %s", counts["collisions"], samples)
 
-    base_allowed_identifiers = set(_BASE_IDENTIFIERS) | set(_ALLOWED_FUNCTIONS)
+    const_names = set(DEFAULT_CONSTS.keys()) | set(extract_const_overrides(raw_data.get("thresholds")).keys())
+
+    base_allowed_identifiers = set(_BASE_IDENTIFIERS) | set(_ALLOWED_FUNCTIONS) | const_names
 
     features_raw = _ensure_mapping(raw_data.get("features"))
     features: dict[str, str] = {}

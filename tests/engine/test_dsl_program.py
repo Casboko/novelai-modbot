@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.engine import DslProgram, DslRuntimeError, DslValidationError, DslPolicy
+from app.engine.loader import build_const_map
 from app.engine.dsl import DslEvaluationInput
 from app.engine.dsl_utils import validate_expr
 from app.engine.types import DslRule, RuleConfigV2
@@ -143,3 +144,75 @@ def test_reason_template_respects_strict_mode() -> None:
                 attachment_count=0,
             )
         )
+
+
+def test_const_identifiers_available_in_strict_mode() -> None:
+    const_map = build_const_map()
+    config = RuleConfigV2(
+        rules=[
+            DslRule(
+                id="CONST-TEST",
+                severity="orange",
+                when="rating.explicit >= const_WD14_EXPL",
+                reasons=["explicit={rating.explicit:.2f}"]
+            )
+        ]
+    )
+    program = DslProgram.from_config(config, DslPolicy.from_mode("strict"), const_map=const_map)
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={"explicit": const_map["const_WD14_EXPL"] + 0.01},
+            metrics={},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is not None
+    assert outcome.rule_id == "CONST-TEST"
+
+
+def test_qe_margin_boundary_behaviour() -> None:
+    const_map = build_const_map()
+    features = {
+        "qe_margin": "max(rating.questionable - const_WD14_QUES, rating.explicit - const_WD14_EXPL)",
+        "is_low_margin": "qe_margin < const_LOW_MARGIN",
+    }
+    rules = [
+        DslRule(id="LOW", severity="yellow", when="is_low_margin", reasons=["margin={qe_margin:.3f}"])
+    ]
+    config = RuleConfigV2(features=features, rules=rules)
+    program = DslProgram.from_config(config, DslPolicy.from_mode("warn"), const_map=const_map)
+
+    low_outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={"explicit": const_map["const_WD14_EXPL"] + 0.02, "questionable": 0.0},
+            metrics={},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert low_outcome is not None
+    assert low_outcome.rule_id == "LOW"
+
+    high_outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={"explicit": const_map["const_WD14_EXPL"] + const_map["const_LOW_MARGIN"] + 0.2,
+                    "questionable": 0.0},
+            metrics={},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert high_outcome is None

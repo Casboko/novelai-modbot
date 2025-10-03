@@ -9,6 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .io.stream import iter_jsonl
+from .engine.loader import load_const_overrides_from_path
 from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 
@@ -52,6 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of records to evaluate")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N records")
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summaries")
+    parser.add_argument("--constA", type=Path, help="Const override file applied to rulesA")
+    parser.add_argument("--constB", type=Path, help="Const override file applied to rulesB")
     return parser.parse_args()
 
 
@@ -387,8 +390,13 @@ def main() -> None:
         print("[info] legacy rules detected. Comparison skipped (see note field).", file=sys.stderr)
         return
 
-    engine_a = RuleEngine(str(args.rulesA), policy=policy_a)
-    engine_b = RuleEngine(str(args.rulesB), policy=policy_b)
+    overrides_a = load_const_overrides_from_path(args.constA) if args.constA else None
+    overrides_b = load_const_overrides_from_path(args.constB) if args.constB else None
+    overrides_a = dict(overrides_a) if overrides_a else None
+    overrides_b = dict(overrides_b) if overrides_b else None
+
+    engine_a = RuleEngine(str(args.rulesA), policy=policy_a, const_overrides=overrides_a)
+    engine_b = RuleEngine(str(args.rulesB), policy=policy_b, const_overrides=overrides_b)
     banner = (
         f"policyA={engine_a.policy.mode}(source={source_a}), "
         f"policyB={engine_b.policy.mode}(source={source_b})"

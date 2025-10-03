@@ -46,6 +46,9 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "severity",
         "rule_id",
         "rule_title",
+        "rating_explicit",
+        "rating_questionable",
+        "qe_margin",
         "wd14_rating_g",
         "wd14_rating_s",
         "wd14_rating_q",
@@ -76,6 +79,9 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "severity",
         "rule_id",
         "rule_title",
+        "rating_explicit",
+        "rating_questionable",
+        "qe_margin",
         "explicit_score",
         "sexual_intensity",
         "nsfw_rating_max",
@@ -96,14 +102,15 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "injury_topk",
         "blood_topk",
         "gore_base_score",
-        "gore_offset",
-        "gore_final_score",
-        "coercion_main_peak",
-        "sec_peak",
-        "sub_cnt",
-        "rest_topk",
-        "coercion_final_score",
-        "coercion_score",
+    "gore_offset",
+    "gore_final_score",
+    "coercion_main_peak",
+    "sec_peak",
+    "sub_cnt",
+    "rest_topk",
+    "coercion_final_score",
+    "coercion_score",
+    "qe_margin",
     ],
     "All": None,
 }
@@ -275,6 +282,8 @@ def handle_run(placeholder, state: SidebarState) -> None:
             extra_args.extend(["--since", state.since.strip()])
         if state.until.strip():
             extra_args.extend(["--until", state.until.strip()])
+        if state.thresholds_path is not None:
+            extra_args.extend(["--const", str(state.thresholds_path)])
         if merged is None:
             p0_path = None
         else:
@@ -332,6 +341,9 @@ def handle_ab(placeholder, state: SidebarState) -> None:
             st.error(str(exc))
             return
         AB_DIR.mkdir(parents=True, exist_ok=True)
+        extra_args = ["--samples-minimal", "--samples-redact-urls"]
+        if state.thresholds_path is not None:
+            extra_args.extend(["--constB", str(state.thresholds_path)])
         try:
             result = utils.run_cli_ab(
                 analysis=state.analysis_path,
@@ -339,7 +351,7 @@ def handle_ab(placeholder, state: SidebarState) -> None:
                 rules_b=compiled.rules_path,
                 out_dir=AB_DIR,
                 sample_diff=200,
-                extra_args=("--samples-minimal", "--samples-redact-urls"),
+                extra_args=extra_args,
             )
         except utils.CliCommandError as exc:
             st.error(str(exc))
@@ -629,6 +641,9 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         feats = (dsl.get("features", {}) or {})
         thumb_path = get_thumbnail_for_record(record)
         ratings = _extract_wd14_rating(record)
+        qe_margin_value = metrics.get("qe_margin")
+        if qe_margin_value is None and isinstance(feats, Mapping):
+            qe_margin_value = feats.get("qe_margin")
         row = {
             "thumbnail": str(thumb_path) if thumb_path else None,
             "phash": record.get("phash"),
@@ -637,6 +652,9 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             "rule_title": record.get("rule_title"),
             "message_link": record.get("message_link"),
             "reasons": "; ".join(record.get("reasons", [])),
+            "rating_questionable": ratings.get("q"),
+            "rating_explicit": ratings.get("e"),
+            "qe_margin": qe_margin_value,
             "exposure_area": metrics.get("exposure_area"),
             "exposure_count": metrics.get("exposure_count"),
             "exposure_score": metrics.get("exposure_score"),
@@ -684,6 +702,8 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
     metrics = record.get("metrics", {}) or {}
     ratings = _extract_wd14_rating(record)
     nude = _extract_nudenet_metrics(record)
+    dsl_block = (metrics.get("dsl") or {}) if isinstance(metrics.get("dsl"), Mapping) else {}
+    dsl_features = (dsl_block.get("features") or {}) if isinstance(dsl_block, Mapping) else {}
 
     rating_cols = st.columns(4)
     rating_labels = {"g": "wd14:g", "s": "wd14:s", "q": "wd14:q", "e": "wd14:e"}
@@ -693,6 +713,11 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
             col.metric(rating_labels[key], "-")
         else:
             col.metric(rating_labels[key], f"{value:.2f}")
+
+    qe_margin_value = metrics.get("qe_margin")
+    if qe_margin_value is None and isinstance(dsl_features, Mapping):
+        qe_margin_value = dsl_features.get("qe_margin")
+    st.metric("qe_margin", "-" if qe_margin_value is None else f"{qe_margin_value:.3f}")
 
     nude_cols = st.columns(3)
     nude_cols[0].metric("exposure_area", f"{nude['area']:.3f}")
