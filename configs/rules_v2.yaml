@@ -14,6 +14,9 @@ rule_titles:
   B-RED-NSFW-EXPL-001: 非NSFWチャンネルの露骨な性表現（Explicitのみ）
   B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネルの性的（Questionable：露骨露出×大面積×主行為強）
   C-ORG-QUES-STRICT-001: 非合意（必須:直截語 × (失神/痛み) + offset）× Q以上
+  E-RED-QPLUS-BEST-001: 獣姦（名指し）× Q以上
+  E-ORG-QPLUS-SUS-001: 獣姦疑い（存在＋強い性的根拠）× Q以上
+  E-YEL-QPLUS-PRES-001: 動物存在 × Q以上
   B-RED-NSFW-001: 非NSFWチャンネルの露骨な性表現
   B-ORG-001: 非NSFWチャンネルの性的コンテンツ
   D-RED-001: 性的文脈を伴うゴア
@@ -635,6 +638,7 @@ features:
   rating_is_questionable: rating.questionable >= 0.35
   rating_is_qplus: rating_is_explicit || rating_is_questionable
   is_Qplus: (rating.explicit >= 0.20) || (rating.questionable >= 0.35)
+  bestiality_peak: max('bestiality_direct')
   coercion_main_peak: max('coercion_main')
   uncon_peak: max('unconscious_states')
   pain_peak: max('pain_expressions')
@@ -817,17 +821,44 @@ rules:
   reasons:
   - gore={gore_intensity:.2f}
   - density={gore_density}
-- id: E-RED-001
+- id: E-RED-QPLUS-BEST-001
   severity: red
-  priority: 45
-  when: max('bestiality_direct') >= 0.2
+  priority: 79
+  when: is_Qplus && (bestiality_peak >= 0.20)
   reasons:
-  - bestiality={max('bestiality_direct'):.2f}
+  - "bestiality={bestiality_peak:.2f}"
+  - "rating=q_plus"
   stop: true
-- id: E-YEL-001
-  severity: yellow
-  priority: 40
-  when: animal_presence >= 0.3 && sexual_intensity >= 0.3
+- id: E-ORG-QPLUS-SUS-001
+  severity: orange
+  priority: 78
+  when: is_Qplus && (animal_presence >= 0.35) && ((sexual_main >= 0.60) || is_explicit_exposed)
   reasons:
-  - animals={animal_presence:.2f}
-  - sexual={sexual_intensity:.2f}
+  - "animal_presence={animal_presence:.2f}"
+  - "sexual_main={sexual_main:.2f}"
+  - "explicit_exposed={is_explicit_exposed}"
+  - "rating=q_plus"
+  stop: true
+- id: E-YEL-QPLUS-PRES-001
+  severity: yellow
+  priority: 77
+  when: is_Qplus && (animal_presence >= 0.35)
+  reasons:
+  - "animal_presence={animal_presence:.2f}"
+  - "rating=q_plus"
+  stop: true
+# 旧 E-RED-001 / E-YEL-001 は v2.1 で無効化（名指しRED / 存在YEL / 疑いORGへ置換）
+# - id: E-RED-001
+#   severity: red
+#   priority: 45
+#   when: max('bestiality_direct') >= 0.2
+#   reasons:
+#   - bestiality={max('bestiality_direct'):.2f}
+#   stop: true
+# - id: E-YEL-001
+#   severity: yellow
+#   priority: 40
+#   when: animal_presence >= 0.3 && sexual_intensity >= 0.3
+#   reasons:
+#   - animals={animal_presence:.2f}
+#   - sexual={sexual_intensity:.2f}

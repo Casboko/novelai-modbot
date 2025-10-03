@@ -58,6 +58,10 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "sub_cnt",
         "rest_topk",
         "coercion_final_score",
+        "bestiality_peak",
+        "animal_presence",
+        "sexual_main",
+        "is_explicit_exposed",
         "coercion_score",
     ],
     "v2 Features": [
@@ -78,6 +82,7 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "sexual_main",
         "exposure_prominent",
         "is_explicit_exposed",
+        "bestiality_peak",
         "gore_peak_conf",
         "gore_density",
         "gore_intensity",
@@ -108,6 +113,8 @@ FEATURE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "sub_cnt": ("sub_cnt",),
     "rest_topk": ("rest_topk",),
     "coercion_final_score": ("coercion_final_score", "coercion_score"),
+    "bestiality_peak": ("bestiality_peak", "bestiality"),
+    "animal_presence": ("animal_presence", "animal_presence_peak"),
 }
 
 
@@ -566,6 +573,7 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         "sexual_main",
         "exposure_prominent",
         "is_explicit_exposed",
+        "bestiality_peak",
         "gore_peak_conf",
         "gore_density",
         "gore_intensity",
