@@ -3,8 +3,8 @@
 
 const:
   wd14:
-    questionable: 0.35
-    explicit: 0.20
+    questionable: 0.50
+    explicit: 0.50
   exposure:
     area:
       mid: 0.15
@@ -24,9 +24,9 @@ const:
   bestiality:
     direct: 0.20
   animal:
-    presence: 0.35
+    presence: 0.50
   gore:
-    main: 0.30
+    main: 0.40
     density: 4.0
     topk: 0.70
     org: 0.70

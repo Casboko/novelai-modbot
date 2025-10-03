@@ -77,6 +77,17 @@ def _count_attachments(record: Mapping[str, Any]) -> int:
     return total
 
 
+def _dedup_preserve_order(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
 def _ensure_placeholder_thumb() -> Path:
     PLACEHOLDER_THUMB.parent.mkdir(parents=True, exist_ok=True)
     if PLACEHOLDER_THUMB.exists():
@@ -573,9 +584,14 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             default=st.session_state.get("scl_visible_columns", default_columns),
             key="scl_visible_columns",
         )
-        visible_columns = [col for col in visible_columns if col in filtered.columns]
+        visible_columns = _dedup_preserve_order(
+            col for col in visible_columns if col in filtered.columns
+        )
         if not visible_columns:
-            visible_columns = default_columns or available_columns
+            fallback_columns = default_columns or available_columns
+            visible_columns = _dedup_preserve_order(
+                col for col in fallback_columns if col in filtered.columns
+            )
         filtered_reset = filtered.reset_index(drop=True)
         df_display = filtered_reset[visible_columns].copy()
 
@@ -926,9 +942,9 @@ def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
 def _default_visible_columns(columns: list[str], preset: str) -> list[str]:
     preset_columns = COLUMN_PRESETS.get(preset)
     if preset_columns is None:
-        return [col for col in columns if col != "thumbnail"]
-    resolved = [col for col in preset_columns if col in columns]
-    return resolved or [col for col in columns if col != "thumbnail"]
+        return _dedup_preserve_order(col for col in columns if col != "thumbnail")
+    resolved = _dedup_preserve_order(col for col in preset_columns if col in columns)
+    return resolved or _dedup_preserve_order(col for col in columns if col != "thumbnail")
 
 
 def _format_feature_value(name: str, value: Any) -> str:
