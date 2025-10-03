@@ -530,7 +530,6 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         horizontal=True,
         key="scl_thumb_size",
     )
-    st.session_state["scl_thumb_size"] = selected_thumb_size
     thumb_width_map = {"S": 96, "M": 128, "L": 160}
     thumb_px = thumb_width_map.get(selected_thumb_size, 128)
     row_height = max(thumb_px, 96)
