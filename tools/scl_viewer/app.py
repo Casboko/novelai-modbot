@@ -53,6 +53,11 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "exposure_area",
         "exposure_count",
         "exposure_score",
+        "coercion_main_peak",
+        "sec_peak",
+        "sub_cnt",
+        "rest_topk",
+        "coercion_final_score",
         "coercion_score",
     ],
     "v2 Features": [
@@ -77,6 +82,11 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "gore_density",
         "gore_intensity",
         "animal_presence",
+        "coercion_main_peak",
+        "sec_peak",
+        "sub_cnt",
+        "rest_topk",
+        "coercion_final_score",
         "coercion_score",
     ],
     "All": None,
@@ -93,6 +103,11 @@ FEATURE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "exposure_prominent": ("exposure_prominent",),
     "minor_suspect_score": ("minor_suspect_score", "minor_body_score"),
     "is_explicit_exposed": ("is_explicit_exposed",),
+    "coercion_main_peak": ("coercion_main_peak",),
+    "sec_peak": ("sec_peak",),
+    "sub_cnt": ("sub_cnt",),
+    "rest_topk": ("rest_topk",),
+    "coercion_final_score": ("coercion_final_score", "coercion_score"),
 }
 
 
@@ -555,6 +570,11 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         "gore_density",
         "gore_intensity",
         "animal_presence",
+        "coercion_main_peak",
+        "sec_peak",
+        "sub_cnt",
+        "rest_topk",
+        "coercion_final_score",
         "coercion_score",
     ]
     present: set[str] = set()

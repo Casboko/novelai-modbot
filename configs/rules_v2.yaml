@@ -13,6 +13,7 @@ rule_titles:
   A-YEL-QUES-SUS-001: 未成年疑い（seed×medium±offset）× Questionable
   B-RED-NSFW-EXPL-001: 非NSFWチャンネルの露骨な性表現（Explicitのみ）
   B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネルの性的（Questionable：露骨露出×大面積×主行為強）
+  C-ORG-QUES-STRICT-001: 非合意（必須:直截語 × (失神/痛み) + offset）× Q以上
   B-RED-NSFW-001: 非NSFWチャンネルの露骨な性表現
   B-ORG-001: 非NSFWチャンネルの性的コンテンツ
   D-RED-001: 性的文脈を伴うゴア
@@ -633,6 +634,16 @@ features:
   rating_is_explicit: rating.explicit >= 0.20
   rating_is_questionable: rating.questionable >= 0.35
   rating_is_qplus: rating_is_explicit || rating_is_questionable
+  is_Qplus: (rating.explicit >= 0.20) || (rating.questionable >= 0.35)
+  coercion_main_peak: max('coercion_main')
+  uncon_peak: max('unconscious_states')
+  pain_peak: max('pain_expressions')
+  sec_peak: max(uncon_peak, pain_peak)
+  base_strength: clamp((coercion_main_peak / 0.55) * (sec_peak / 0.55), 0, 1)
+  sub_cnt: count('coercion_sub', gt=0.50)
+  rest_topk: topk_sum('restraint_gear', k=3, gt=0.50)
+  offset_strength: clamp((sub_cnt * 0.12) + ((rest_topk / 1.50) * 0.18), 0, 0.30)
+  coercion_final_score: clamp(base_strength + offset_strength, 0, 1)
   is_E: rating.explicit >= 0.20
   is_Q: rating.questionable >= 0.35
   sexual_main: topk_sum('sexual_act_lexicon', k=3, gt=0.50)
@@ -659,14 +670,26 @@ features:
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
 rules:
-- id: C-RED-001
-  severity: red
-  priority: 100
-  when: sexual_intensity >= 0.5 && coercion_score >= 1.0
+- id: C-ORG-QUES-STRICT-001
+  severity: orange
+  priority: 85
+  when: is_Qplus && (coercion_final_score >= 0.95)
   reasons:
-  - sexual={sexual_intensity:.2f}
-  - coercion={coercion_score:.2f}
+  - "coercion_main={coercion_main_peak:.2f}"
+  - "sec_peak={sec_peak:.2f}"
+  - "offset=sub_cnt:{sub_cnt}, rest_topk:{rest_topk:.2f}"
+  - "final={coercion_final_score:.2f}"
+  - "rating=q_plus"
   stop: true
+# 旧 C-RED-001 は v2.1 で無効化（合算＋RED判定を撤廃）
+# - id: C-RED-001
+#   severity: red
+#   priority: 100
+#   when: sexual_intensity >= 0.5 && coercion_score >= 1.0
+#   reasons:
+#   - sexual={sexual_intensity:.2f}
+#   - coercion={coercion_score:.2f}
+#   stop: true
 # 旧 A-RED-001 / A-YEL-001 は v2.1 で無効化（Minor 合算スコア撤廃）
 # - id: A-RED-001
 #   severity: red
