@@ -17,12 +17,8 @@ rule_titles:
   E-RED-QPLUS-BEST-001: 獣姦（名指し）× Q以上
   E-ORG-QPLUS-SUS-001: 獣姦疑い（存在＋強い性的根拠）× Q以上
   E-YEL-QPLUS-PRES-001: 動物存在 × Q以上
-  B-RED-NSFW-001: 非NSFWチャンネルの露骨な性表現
-  B-ORG-001: 非NSFWチャンネルの性的コンテンツ
-  D-RED-001: 性的文脈を伴うゴア
-  D-ORG-001: ショッキングな流血・損壊
-  E-RED-001: 獣姦タグ検出
-  E-YEL-001: 動物＋性的文脈（要レビュー）
+  D-RED-SEX-GORE-STRICT-001: 性的 × 重ゴア（厳格ANDゲート＋オフセット）
+  D-ORG-GORE-STRICT-001: 重ゴア（厳格ANDゲート＋オフセット）
 nsfw_general_tags:
   - nipples
   - nipple_slip
@@ -207,12 +203,10 @@ groups:
   - buttjob
   - caressing_testicles
   - caught
-  - chain
   - cleave_gag
   - clothed_female_nude_male
   - clothed_masturbation
   - clothed_sex
-  - collar
   - condom
   - cooperative_fellatio
   - cooperative_paizuri
@@ -221,7 +215,6 @@ groups:
   - crotch_grab
   - crotch_rope
   - crotch_rub
-  - cuffs
   - cum
   - cum_in_ass
   - cum_in_clothes
@@ -290,7 +283,6 @@ groups:
   - guided_breast_grab
   - guided_penetration
   - hairjob
-  - handcuffs
   - handjob
   - happy_sex
   - have_to_pee
@@ -312,12 +304,9 @@ groups:
   - lactation
   - lactation_through_clothes
   - large_insertion
-  - leash
-  - leash_pull
   - licking_foot
   - lotion
   - lotion_bottle
-  - lube
   - male_masturbation
   - masturbation
   - mating_press
@@ -341,11 +330,9 @@ groups:
   - paizuri_under_clothes
   - peeing
   - peeing_self
-  - peeking
   - penises_touching
   - perpendicular_paizuri
   - pet_play
-  - piercing
   - pregnant
   - prone_bone
   - prostitution
@@ -359,12 +346,10 @@ groups:
   - reverse_upright_straddle
   - riding_crop
   - ring_gag
-  - rope
   - sex
   - sex_from_behind
   - sex_machine
   - sex_toy
-  - shackles
   - shibari
   - shibari_over_clothes
   - sitting_on_face
@@ -401,7 +386,6 @@ groups:
   - vibrator_under_panties
   - voyeurism
   - wakamezake
-  - whip
   - x-ray
   sexual_context_boosters:
   - adjusting_clothes
@@ -552,8 +536,6 @@ groups:
   - suicide
   - corpse
   - death
-  - impaled
-  - stab
   blood_tags:
   - blood
   - bleeding
@@ -667,10 +649,19 @@ features:
   minor_neg_offset: clamp((max('minor_body_special') / 0.35) * 0.30, 0, 0.30)
   minor_suspect_score: clamp(minor_suspect_base + minor_pos_offset - minor_neg_offset,
     0, 1)
-  gore_peak_conf: max('gore_peak')
-  gore_density: count('blood_tags', gt=0.35) + count('injury_tags', gt=0.35)
-  gore_intensity: max('gore_peak') + 0.5 * (count('blood_tags', gt=0.35) + count('injury_tags',
-    gt=0.35)) + 0.5 * sum('pain_expressions')
+  gore_main_peak: max('gore_peak')
+  injury_topk: topk_sum('injury_tags', k=3, gt=0.35)
+  blood_topk: topk_sum('blood_tags', k=3, gt=0.35)
+  gore_density_cnt: count('injury_tags', gt=0.35) + count('blood_tags', gt=0.35)
+  gore_heavy_gate: (gore_main_peak >= 0.30) && (gore_density_cnt >= 4) && ((injury_topk >= 0.70) || (blood_topk >= 0.70))
+  t_main: clamp(gore_main_peak / 0.30, 0, 1)
+  t_dense: clamp(gore_density_cnt / 4.0, 0, 1)
+  t_int: max(clamp(injury_topk / 0.70, 0, 1), clamp(blood_topk / 0.70, 0, 1))
+  gore_base_score: clamp(t_main * t_dense * t_int, 0, 1) * 0.60
+  death_cnt: count('death_markers', gt=0.35)
+  pain_cnt: count('pain_expressions', gt=0.35)
+  gore_offset: clamp(death_cnt * 0.20 + pain_cnt * 0.10, 0, 0.40)
+  gore_final_score: clamp(gore_base_score + gore_offset, 0, 1)
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
 rules:
@@ -806,21 +797,39 @@ rules:
 #   - sexual={sexual_intensity:.2f}
 #   - rating={nsfw_rating_max:.2f}
 #   - exposure={exposure_area:.2f}
-- id: D-RED-001
+- id: D-RED-SEX-GORE-STRICT-001
   severity: red
-  priority: 55
-  when: (gore_peak_conf >= 0.2 || gore_intensity >= 2.5) && sexual_intensity >= 0.3
+  priority: 78
+  when: gore_heavy_gate && (gore_final_score >= 0.85) && (is_E || sexual_main >= 0.60)
   reasons:
-  - gore={gore_intensity:.2f}
-  - sexual={sexual_intensity:.2f}
+  - "gate main={gore_main_peak:.2f} dense={gore_density_cnt} int=max({injury_topk:.2f},{blood_topk:.2f})"
+  - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
+  - "sexual_main={sexual_main:.2f} explicit={rating.explicit:.2f}"
   stop: true
-- id: D-ORG-001
+- id: D-ORG-GORE-STRICT-001
   severity: orange
-  priority: 50
-  when: gore_peak_conf >= 0.2 || gore_density >= 3 || gore_intensity >= 2.0
+  priority: 67
+  when: gore_heavy_gate && (gore_final_score >= 0.70)
   reasons:
-  - gore={gore_intensity:.2f}
-  - density={gore_density}
+  - "gate main={gore_main_peak:.2f} dense={gore_density_cnt} int=max({injury_topk:.2f},{blood_topk:.2f})"
+  - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
+  stop: true
+# 旧 D-RED-001 / D-ORG-001 は v2.1 で無効化（重ゴアANDゲートへ移行）
+# - id: D-RED-001
+#   severity: red
+#   priority: 55
+#   when: (gore_peak_conf >= 0.2 || gore_intensity >= 2.5) && sexual_intensity >= 0.3
+#   reasons:
+#   - gore={gore_intensity:.2f}
+#   - sexual={sexual_intensity:.2f}
+#   stop: true
+# - id: D-ORG-001
+#   severity: orange
+#   priority: 50
+#   when: gore_peak_conf >= 0.2 || gore_density >= 3 || gore_intensity >= 2.0
+#   reasons:
+#   - gore={gore_intensity:.2f}
+#   - density={gore_density}
 - id: E-RED-QPLUS-BEST-001
   severity: red
   priority: 79
