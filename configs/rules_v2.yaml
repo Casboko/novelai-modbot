@@ -205,6 +205,9 @@ groups:
   - caught
   - cleave_gag
   - clothed_female_nude_male
+  - clothed_female_nude_female
+  - clothed_male_nude_female
+  - clothed_male_nude_male
   - clothed_masturbation
   - clothed_sex
   - condom

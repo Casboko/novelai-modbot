@@ -113,6 +113,7 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "message_time",
         "author_short",
         "channel_short",
+        "is_nsfw_channel",
         "message_link",
     ],
     "Moderation Core": [
@@ -141,6 +142,7 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "animal_presence",
         "sexual_main",
         "is_explicit_exposed",
+        "is_nsfw_channel",
         "gore_main_peak",
         "gore_density_cnt",
         "injury_topk",
@@ -763,6 +765,10 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         qe_margin_value = metrics.get("qe_margin")
         if qe_margin_value is None and isinstance(feats, Mapping):
             qe_margin_value = feats.get("qe_margin")
+        is_nsfw_flag = record.get("is_nsfw_channel")
+        if is_nsfw_flag is None:
+            channel_info = record.get("channel") or {}
+            is_nsfw_flag = channel_info.get("is_nsfw")
         row = {
             "thumbnail": str(thumb_path) if thumb_path else None,
             "phash": record.get("phash"),
@@ -784,6 +790,7 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             "wd14_rating_s": ratings.get("s"),
             "wd14_rating_q": ratings.get("q"),
             "wd14_rating_e": ratings.get("e"),
+            "is_nsfw_channel": None if is_nsfw_flag is None else bool(is_nsfw_flag),
         }
         row.update(
             {
