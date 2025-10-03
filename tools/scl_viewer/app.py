@@ -35,6 +35,12 @@ P0_MERGED_PATH = TMP_DIR / "p0_merged.csv"
 AB_DIR = TMP_DIR / "ab"
 
 SEVERITY_ORDER = ["red", "orange", "yellow", "green"]
+SEVERITY_BADGES = {
+    "red": "🟥 RED",
+    "orange": "🟧 ORANGE",
+    "yellow": "🟨 YELLOW",
+    "green": "🟩 GREEN",
+}
 DEFAULT_RULES = Path("configs/rules_v2.yaml")
 DEFAULT_THRESHOLDS = Path("configs/scl/scl_thresholds.yaml")
 DEFAULT_ANALYSIS = Path("out/p2/p2_analysis_all.jsonl")
@@ -42,6 +48,8 @@ DEFAULT_RULES_PREV = Path("configs/rules_v2_prev.yaml")
 
 COLUMN_PRESETS: dict[str, list[str] | None] = {
     "Moderation Core": [
+        "sev_badge",
+        "thumbnail",
         "phash",
         "severity",
         "rule_id",
@@ -75,6 +83,8 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "coercion_score",
     ],
     "v2 Features": [
+        "sev_badge",
+        "thumbnail",
         "phash",
         "severity",
         "rule_id",
@@ -443,6 +453,8 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
     filtered = filtered.copy()
     if "severity" in filtered.columns:
         filtered = filtered.sort_values("severity", key=_severity_sort_key)
+    if "severity" in filtered.columns and "sev_badge" not in filtered.columns:
+        filtered.insert(0, "sev_badge", filtered["severity"].map(lambda sev: SEVERITY_BADGES.get(str(sev), "⬜ -")))
 
     st.session_state["findings_df"] = df
 
@@ -474,47 +486,39 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
         visible_columns = [col for col in visible_columns if col in filtered.columns]
         if not visible_columns:
             visible_columns = default_columns or available_columns
-        df_show = filtered[visible_columns]
+        filtered_reset = filtered.reset_index(drop=True)
+        df_display = filtered_reset[visible_columns].copy()
 
         table_column_config: dict[str, Any] = {}
-        if "thumbnail" in df_show.columns:
+        if "thumbnail" in df_display.columns:
             table_column_config["thumbnail"] = st.column_config.ImageColumn(
                 "thumb",
                 help="p0 添付から生成したサムネイル",
                 width=120,
             )
 
-        rendered_df = df_show.reset_index(drop=True)
-        st.dataframe(rendered_df, width="stretch", column_config=table_column_config)
+        event = st.dataframe(
+            df_display,
+            key="findings_table",
+            width="stretch",
+            column_config=table_column_config,
+            on_select="rerun",
+            selection_mode="single-row",
+            row_height=96,
+        )
 
-        if not rendered_df.empty:
-            total_rows = len(rendered_df)
-            stored_index = st.session_state.get("last_selected_index")
-            if stored_index is None or stored_index >= total_rows:
-                stored_index = 0
-            prev_btn, next_btn = st.columns([1, 1])
-            with prev_btn:
-                if st.button("◀", disabled=total_rows <= 1, key="scl_prev_record"):
-                    stored_index = (stored_index - 1) % total_rows
-            with next_btn:
-                if st.button("▶", disabled=total_rows <= 1, key="scl_next_record"):
-                    stored_index = (stored_index + 1) % total_rows
-            index_input = st.number_input(
-                "表示するレコード番号",
-                min_value=0,
-                max_value=total_rows - 1,
-                value=stored_index,
-                step=1,
-                key="scl_selected_index",
-            )
-            st.session_state["last_selected_index"] = index_input
-            selected_phash = rendered_df.loc[index_input, "phash"] if "phash" in rendered_df.columns else None
-            st.session_state["last_selected_phash"] = selected_phash
-        else:
-            st.session_state["last_selected_index"] = None
+        selected_rows = getattr(getattr(event, "selection", None), "rows", []) or []
+        if selected_rows:
+            idx = int(selected_rows[0])
+            if 0 <= idx < len(filtered_reset):
+                selected_row = filtered_reset.loc[idx]
+                st.session_state["last_selected_phash"] = selected_row.get("phash")
+        elif df_display.empty:
             st.session_state["last_selected_phash"] = None
 
-        st.session_state["findings_df"] = df
+        st.caption(
+            "💡 行をクリックすると右側に詳細を表示します。列をソートすると選択はクリアされますが、右ペインは直前の表示を維持します。"
+        )
 
     with right_col:
         selected_record = None
