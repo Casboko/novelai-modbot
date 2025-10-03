@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +46,13 @@ SEVERITY_BADGES = {
     "yellow": "🟨 YELLOW",
     "green": "🟩 GREEN",
 }
+
+LAYOUT_MODES = ("classic", "stacked")
+DEFAULT_LAYOUT_MODE = "stacked"
+DEFAULT_LIST_HEIGHT_PX = 420
+LIST_HEIGHT_MIN_PX = 260
+LIST_HEIGHT_MAX_PX = 900
+LIST_HEIGHT_STEP_PX = 20
 
 
 def _fmt_time_iso_to_min(iso_like: object) -> str | None:
@@ -231,6 +239,76 @@ def _feature_value_with_fallback(feats: Mapping[str, Any], name: str) -> Any:
     return feats.get(name)
 
 
+def _trigger_run(source: str = "main") -> None:
+    st.session_state["__run_trigger_ts__"] = time.time()
+    st.session_state["__run_source__"] = source
+
+
+def should_run(state: SidebarState) -> bool:
+    run_clicked = getattr(state, "run_clicked", False)
+    if run_clicked:
+        _trigger_run("sidebar")
+        try:
+            state.run_clicked = False
+        except Exception:
+            pass
+
+    trigger_ts = float(st.session_state.get("__run_trigger_ts__", 0.0))
+    handled_ts = float(st.session_state.get("__run_handled_ts__", 0.0))
+    return trigger_ts > handled_ts
+
+
+def mark_run_handled() -> None:
+    st.session_state["__run_handled_ts__"] = float(
+        st.session_state.get("__run_trigger_ts__", 0.0)
+    )
+
+
+def _get_state_value(
+    state: SidebarState,
+    *keys: str,
+    default: str = "-",
+) -> str:
+    for key in keys:
+        value = getattr(state, key, None)
+        if value:
+            return str(value)
+    for key in keys:
+        value = st.session_state.get(key)
+        if value:
+            return str(value)
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return str(value)
+    return default
+
+
+def _update_selection_from_event(event, df_for_selection: pd.DataFrame) -> None:
+    rows = getattr(getattr(event, "selection", None), "rows", []) or []
+    if rows:
+        idx = int(rows[0])
+        if 0 <= idx < len(df_for_selection):
+            st.session_state["last_selected_phash"] = df_for_selection.loc[idx, "phash"]
+    elif df_for_selection.empty:
+        st.session_state["last_selected_phash"] = None
+
+
+def _get_selected_record(records: list[dict]) -> dict | None:
+    phash = st.session_state.get("last_selected_phash")
+    if phash is None:
+        return None
+    return next((rec for rec in records if rec.get("phash") == phash), None)
+
+
+def _where_list(layout_mode: str) -> str:
+    return "上段" if layout_mode == "stacked" else "左側"
+
+
+def _where_detail(layout_mode: str) -> str:
+    return "下段" if layout_mode == "stacked" else "右側"
+
+
 def main() -> None:
     st.set_page_config(page_title="SCL Viewer", layout="wide")
     st.title("SCL ルールチューニングビューア")
@@ -238,10 +316,26 @@ def main() -> None:
 
     sidebar_state = render_sidebar()
 
+    current_layout = st.session_state.get("layout_mode", DEFAULT_LAYOUT_MODE)
+    try:
+        layout_index = list(LAYOUT_MODES).index(current_layout)
+    except ValueError:
+        layout_index = list(LAYOUT_MODES).index(DEFAULT_LAYOUT_MODE)
+    layout_mode = st.radio(
+        "Layout",
+        options=list(LAYOUT_MODES),
+        index=layout_index,
+        horizontal=True,
+        key="layout_mode",
+    )
+
     action_placeholder = st.empty()
 
-    if sidebar_state.run_clicked:
-        handle_run(action_placeholder, sidebar_state)
+    if should_run(sidebar_state):
+        try:
+            handle_run(action_placeholder, sidebar_state)
+        finally:
+            mark_run_handled()
     if sidebar_state.report_clicked:
         handle_report(action_placeholder)
     if sidebar_state.ab_clicked:
@@ -251,7 +345,7 @@ def main() -> None:
 
     findings_records = st.session_state.get("findings_records")
     if findings_records:
-        render_findings(findings_records, sidebar_state)
+        render_findings(findings_records, sidebar_state, layout_mode)
     else:
         st.info("Run を実行すると最新の findings を表示します。")
 
@@ -317,7 +411,7 @@ def render_sidebar() -> SidebarState:
         since = st.text_input("since", value="2000-01-01", help="YYYY-MM-DD ないし相対指定")
         until = st.text_input("until", value="2100-01-01", help="YYYY-MM-DD ないし相対指定")
         st.divider()
-        run_clicked = st.button("Run (cli_scan)")
+        run_clicked = st.button("Run (cli_scan)", key="run_btn_sidebar")
         report_clicked = st.button("Report (cli_report)")
         ab_clicked = st.button("A/B diff (cli_rules_ab)")
         contract_clicked = st.button("契約チェック (cli_contract)")
@@ -504,7 +598,7 @@ def load_ab_outputs() -> None:
         st.session_state.pop("ab_samples", None)
 
 
-def render_findings(records: list[dict], state: SidebarState) -> None:
+def render_findings(records: list[dict], state: SidebarState, layout_mode: str) -> None:
     rules_source = st.session_state.get("rules_effective_path")
     rules_path = Path(rules_source) if rules_source else state.rules_path
 
@@ -524,47 +618,88 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
     if "severity" in filtered.columns:
         filtered = filtered.sort_values("severity", key=_severity_sort_key)
     if "severity" in filtered.columns and "sev_badge" not in filtered.columns:
-        filtered.insert(0, "sev_badge", filtered["severity"].map(lambda sev: SEVERITY_BADGES.get(str(sev), "⬜ -")))
+        filtered.insert(
+            0,
+            "sev_badge",
+            filtered["severity"].map(lambda sev: SEVERITY_BADGES.get(str(sev), "⬜ -")),
+        )
 
     st.session_state["findings_df"] = df
 
-    st.subheader("Findings")
-    thumb_size_options = ["S", "M", "L"]
-    default_thumb_size = st.session_state.get("scl_thumb_size", "M")
-    default_thumb_index = (
-        thumb_size_options.index(default_thumb_size)
-        if default_thumb_size in thumb_size_options
-        else 1
-    )
-    selected_thumb_size = st.radio(
-        "サムネサイズ",
-        thumb_size_options,
-        index=default_thumb_index,
-        horizontal=True,
-        key="scl_thumb_size",
-    )
-    thumb_width_map = {"S": 96, "M": 128, "L": 160}
-    thumb_px = thumb_width_map.get(selected_thumb_size, 128)
-    row_height = max(thumb_px, 96)
+    if "list_height_px" not in st.session_state:
+        st.session_state["list_height_px"] = DEFAULT_LIST_HEIGHT_PX
 
-    with st.popover("🔎 クイックプレビュー", use_container_width=True):
-        selected_phash = st.session_state.get("last_selected_phash")
-        if selected_phash:
-            selected_record = next(
-                (rec for rec in records if rec.get("phash") == selected_phash),
-                None,
+    mode = layout_mode if layout_mode in LAYOUT_MODES else DEFAULT_LAYOUT_MODE
+
+    if mode == "stacked":
+        left_col, right_col = st.columns([1, 6], gap="small")
+    else:
+        left_col, right_col = st.columns([3, 7], gap="large")
+
+    if mode == "stacked":
+        with left_col:
+            st.subheader("Controls")
+            if st.button("Run / Refresh", type="primary", key="run_btn_main"):
+                _trigger_run("main")
+                st.experimental_rerun()
+
+            st.caption("Cache Root")
+            st.code(_get_state_value(state, "cache_root", "CACHE_ROOT"), language=None)
+
+            st.caption("Rules file")
+            st.code(_get_state_value(state, "rules_path", "rules"), language=None)
+
+            st.caption("Analysis")
+            st.code(
+                _get_state_value(state, "analysis_path", "analysis_glob", "input_csv"),
+                language=None,
             )
-            if selected_record:
-                preview_thumb = get_thumbnail_for_record(selected_record)
+
+    table_host = right_col if mode == "stacked" else left_col
+    filtered_reset = filtered.reset_index(drop=True)
+
+    def render_table_area() -> None:
+        loc_table = _where_list(mode)
+        loc_detail = _where_detail(mode)
+
+        header_col, height_col = st.columns([4, 1], gap="small")
+        with header_col:
+            st.subheader("Findings")
+        with height_col:
+            st.number_input(
+                "height(px)",
+                LIST_HEIGHT_MIN_PX,
+                LIST_HEIGHT_MAX_PX,
+                st.session_state.get("list_height_px", DEFAULT_LIST_HEIGHT_PX),
+                LIST_HEIGHT_STEP_PX,
+                key="list_height_px",
+            )
+
+        with st.popover("🔎 クイックプレビュー", use_container_width=True):
+            preview_record = _get_selected_record(records)
+            if preview_record:
+                preview_thumb = get_thumbnail_for_record(preview_record)
                 st.image(str(preview_thumb), width=512)
             else:
-                st.caption("選択中のレコードが見つかりません。")
-        else:
-            st.caption("行を選択するとプレビューを表示します。")
+                st.caption(f"{loc_table}の一覧で行を選択してください。")
 
-    left_col, right_col = st.columns([5, 3], gap="large")
+        thumb_size_options = ["S", "M", "L"]
+        default_thumb_size = st.session_state.get("scl_thumb_size", "M")
+        try:
+            default_thumb_index = thumb_size_options.index(default_thumb_size)
+        except ValueError:
+            default_thumb_index = 1
+        selected_thumb_size = st.radio(
+            "サムネサイズ",
+            thumb_size_options,
+            index=default_thumb_index,
+            horizontal=True,
+            key="scl_thumb_size",
+        )
+        thumb_width_map = {"S": 96, "M": 128, "L": 160}
+        thumb_px = thumb_width_map.get(selected_thumb_size, 128)
+        row_height = max(thumb_px, 96)
 
-    with left_col:
         preset = st.radio(
             "列プリセット",
             list(COLUMN_PRESETS.keys()),
@@ -594,7 +729,7 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             visible_columns = _dedup_preserve_order(
                 col for col in fallback_columns if col in filtered.columns
             )
-        filtered_reset = filtered.reset_index(drop=True)
+
         df_display = filtered_reset[visible_columns].copy()
 
         table_column_config: dict[str, Any] = {}
@@ -614,28 +749,36 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
             column_config=table_column_config,
             on_select="rerun",
             selection_mode="single-row",
+            height=st.session_state["list_height_px"],
             row_height=row_height,
         )
 
-        selected_rows = getattr(getattr(event, "selection", None), "rows", []) or []
-        if selected_rows:
-            idx = int(selected_rows[0])
-            if 0 <= idx < len(filtered_reset):
-                selected_row = filtered_reset.loc[idx]
-                st.session_state["last_selected_phash"] = selected_row.get("phash")
-        elif df_display.empty:
-            st.session_state["last_selected_phash"] = None
+        _update_selection_from_event(event, filtered_reset)
 
         st.caption(
-            "💡 行をクリックすると右側に詳細を表示します。列をソートすると選択はクリアされますが、右ペインは直前の表示を維持します。"
+            f"💡 行をクリックすると{loc_detail}に詳細を表示します。列をソートすると選択はクリアされますが、{loc_detail}は直前の表示を維持します。"
         )
 
-    with right_col:
-        selected_record = None
-        selected_phash = st.session_state.get("last_selected_phash")
-        if selected_phash:
-            selected_record = next((rec for rec in records if rec.get("phash") == selected_phash), None)
-        render_detail_panel(selected_record, rules_path=rules_path)
+    if mode == "stacked":
+        with table_host:
+            with st.container(border=True):
+                render_table_area()
+            st.divider()
+            with st.container(border=True):
+                render_detail_panel(
+                    _get_selected_record(records),
+                    rules_path=rules_path,
+                    layout_mode=mode,
+                )
+    else:
+        with table_host:
+            render_table_area()
+        with right_col:
+            render_detail_panel(
+                _get_selected_record(records),
+                rules_path=rules_path,
+                layout_mode=mode,
+            )
 def get_thumbnail_for_record(record: dict) -> Path:
     phash = record.get("phash")
     if not phash:
@@ -807,10 +950,16 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
     return df
 
 
-def render_detail_panel(record: dict | None, *, rules_path: Path) -> None:
+def render_detail_panel(
+    record: dict | None,
+    *,
+    rules_path: Path,
+    layout_mode: str = DEFAULT_LAYOUT_MODE,
+) -> None:
     st.subheader("詳細")
+    mode = layout_mode if layout_mode in LAYOUT_MODES else DEFAULT_LAYOUT_MODE
     if not record:
-        st.info("左の表で行を選択すると詳細を表示します。")
+        st.info(f"{_where_list(mode)}の一覧で行を選択すると詳細を表示します。")
         return
 
     metrics = record.get("metrics", {}) or {}
