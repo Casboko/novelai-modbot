@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -41,12 +42,54 @@ SEVERITY_BADGES = {
     "yellow": "🟨 YELLOW",
     "green": "🟩 GREEN",
 }
+
+
+def _fmt_time_iso_to_min(iso_like: object) -> str | None:
+    if not iso_like:
+        return None
+    value = str(iso_like)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _short_id(value: object, prefix: str) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    if not text:
+        return "-"
+    return f"{prefix}{text[-6:]}"
+
+
+def _count_attachments(record: Mapping[str, Any]) -> int:
+    total = 0
+    for message in record.get("messages", []) or []:
+        if not isinstance(message, Mapping):
+            continue
+        attachments = message.get("attachments") or []
+        total += len(attachments)
+    return total
 DEFAULT_RULES = Path("configs/rules_v2.yaml")
 DEFAULT_THRESHOLDS = Path("configs/scl/scl_thresholds.yaml")
 DEFAULT_ANALYSIS = Path("out/p2/p2_analysis_all.jsonl")
 DEFAULT_RULES_PREV = Path("configs/rules_v2_prev.yaml")
 
 COLUMN_PRESETS: dict[str, list[str] | None] = {
+    "Core": [
+        "sev_badge",
+        "thumbnail",
+        "severity",
+        "rule_id",
+        "wd14_rating_e",
+        "exposure_area",
+        "message_time",
+        "author_short",
+        "channel_short",
+        "message_link",
+    ],
     "Moderation Core": [
         "sev_badge",
         "thumbnail",
@@ -496,6 +539,8 @@ def render_findings(records: list[dict], state: SidebarState) -> None:
                 help="p0 添付から生成したサムネイル",
                 width=120,
             )
+        if "message_link" in df_display.columns:
+            table_column_config["message_link"] = st.column_config.LinkColumn("link")
 
         event = st.dataframe(
             df_display,
@@ -670,6 +715,14 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             "wd14_rating_q": ratings.get("q"),
             "wd14_rating_e": ratings.get("e"),
         }
+        row.update(
+            {
+                "message_time": _fmt_time_iso_to_min(record.get("created_at")),
+                "author_short": _short_id(record.get("author_id"), "a"),
+                "channel_short": _short_id(record.get("channel_id"), "c"),
+                "att_count": _count_attachments(record),
+            }
+        )
         for feature_name in col_features:
             row[feature_name] = _feature_value_with_fallback(feats, feature_name)
         rows.append(row)
