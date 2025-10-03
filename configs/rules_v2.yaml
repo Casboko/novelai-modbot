@@ -620,10 +620,7 @@ features:
   rating_is_questionable: rating.questionable >= const_WD14_QUES
   rating_is_qplus: rating_is_explicit || rating_is_questionable
   is_Qplus: (rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)
-  qe_margin: max(
-    rating.questionable - const_WD14_QUES,
-    rating.explicit - const_WD14_EXPL
-  )
+  qe_margin: max(rating.questionable - const_WD14_QUES, rating.explicit - const_WD14_EXPL)
   is_low_margin: qe_margin < const_LOW_MARGIN
   bestiality_peak: max('bestiality_direct')
   coercion_main_peak: max('coercion_main')
