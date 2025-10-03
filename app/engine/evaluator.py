@@ -233,6 +233,7 @@ class DslEvaluator:
         evaluator: SafeEvaluator,
     ) -> Dict[str, float]:
         values: Dict[str, float] = {}
+        namespace = evaluator._namespace  # underlying dict shared with runtime
         for feature in features:
             with evaluator.context(f"feature:{feature.name}"):
                 try:
@@ -246,6 +247,11 @@ class DslEvaluator:
             else:
                 numeric = 0.0
             values[feature.name] = numeric
+            try:
+                namespace[feature.name] = numeric
+            except TypeError:
+                # namespace may be an immutable mapping; skip in that case
+                pass
         return values
 
     def _evaluate_rules(

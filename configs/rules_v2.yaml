@@ -635,7 +635,7 @@ features:
   rest_topk: topk_sum('restraint_gear', k=3, gt=0.50)
   offset_strength: clamp((sub_cnt * 0.12) + ((rest_topk / 1.50) * 0.18), 0, 0.30)
   coercion_final_score: clamp(base_strength + offset_strength, 0, 1)
-  coercion_org_threshold: const_COERCION_ORG + (0.03 * clamp(is_low_margin, 0, 1))
+  coercion_org_threshold: const_COERCION_ORG + (0.03 * is_low_margin)
   is_e: rating.explicit >= const_WD14_EXPL
   is_q: rating.questionable >= const_WD14_QUES
   sexual_main: topk_sum('sexual_act_lexicon', k=3, gt=0.50)
@@ -669,8 +669,8 @@ features:
   pain_cnt: count('pain_expressions', gt=0.35)
   gore_offset: clamp(death_cnt * 0.20 + pain_cnt * 0.10, 0, 0.40)
   gore_final_score: clamp(gore_base_score + gore_offset, 0, 1)
-  gore_org_threshold: const_GORE_ORG + (0.03 * clamp(is_low_margin, 0, 1))
-  gore_red_threshold: const_GORE_RED + (0.03 * clamp(is_low_margin, 0, 1))
+  gore_org_threshold: const_GORE_ORG + (0.03 * is_low_margin)
+  gore_red_threshold: const_GORE_RED + (0.03 * is_low_margin)
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
 rules:
