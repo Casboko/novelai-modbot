@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import altair as alt
 import pandas as pd
@@ -64,9 +64,10 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
         "sexual_intensity",
         "nsfw_rating_max",
         "minor_peak_conf",
-        "minor_body_score",
-        "minor_context_score",
-        "minor_special_score",
+        "minor_main_peak",
+        "minor_sit_high_peak",
+        "minor_sit_other_peak",
+        "minor_suspect_score",
         "gore_peak_conf",
         "gore_density",
         "gore_intensity",
@@ -75,6 +76,22 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
     ],
     "All": None,
 }
+
+
+FEATURE_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "minor_main_peak": ("minor_main_peak", "minor_peak_conf"),
+    "minor_sit_high_peak": ("minor_sit_high_peak", "minor_context_score"),
+    "minor_sit_other_peak": ("minor_sit_other_peak", "minor_context_score"),
+    "minor_suspect_score": ("minor_suspect_score", "minor_body_score"),
+}
+
+
+def _feature_value_with_fallback(feats: Mapping[str, Any], name: str) -> Any:
+    for candidate in FEATURE_FALLBACKS.get(name, (name,)):
+        value = feats.get(candidate)
+        if value is not None:
+            return value
+    return feats.get(name)
 
 
 def main() -> None:
@@ -515,9 +532,10 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         "explicit_score",
         "sexual_intensity",
         "minor_peak_conf",
-        "minor_body_score",
-        "minor_context_score",
-        "minor_special_score",
+        "minor_main_peak",
+        "minor_sit_high_peak",
+        "minor_sit_other_peak",
+        "minor_suspect_score",
         "gore_peak_conf",
         "gore_density",
         "gore_intensity",
@@ -566,7 +584,7 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             "wd14_rating_e": ratings.get("e"),
         }
         for feature_name in col_features:
-            row[feature_name] = feats.get(feature_name)
+            row[feature_name] = _feature_value_with_fallback(feats, feature_name)
         rows.append(row)
     df = pd.DataFrame(rows)
     return df

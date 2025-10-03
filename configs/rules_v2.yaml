@@ -4,6 +4,13 @@ rule_titles:
   C-RED-001: 非合意の性的描写
   A-RED-001: 未成年×性的（厳重警告）
   A-YEL-001: 要確認：幼い体型＋性的文脈
+  A-RED-EXPL-001: 未成年（直截語）× Explicit
+  A-ORG-QUES-001: 未成年（直截語）× Questionable
+  A-RED-SIT-H-QPLUS-001: 未成年状況（high）× Q以上
+  A-RED-EXPL-SIT-O-001: 未成年状況（other）× Explicit
+  A-ORG-QUES-SIT-O-001: 未成年状況（other）× Questionable
+  A-ORG-EXPL-SUS-001: 未成年疑い（seed×medium±offset）× Explicit
+  A-YEL-QUES-SUS-001: 未成年疑い（seed×medium±offset）× Questionable
   B-RED-NSFW-001: 非NSFWチャンネルの露骨な性表現
   B-ORG-001: 非NSFWチャンネルの性的コンテンツ
   D-RED-001: 性的文脈を伴うゴア
@@ -621,13 +628,23 @@ features:
     gt=0.35), 0, 2) * 0.5 + clamp(max('unconscious_states') / 0.2, 0, 1) * 0.5 + clamp(count('pain_expressions',
     gt=0.2) / 2, 0, 1) * 0.5 + clamp(topk_sum('restraint_gear', k=3, gt=0.2) / 0.6,
     0, 1) * 0.5
+  rating_is_explicit: rating.explicit >= 0.20
+  rating_is_questionable: rating.questionable >= 0.35
+  rating_is_qplus: rating_is_explicit || rating_is_questionable
   minor_peak_conf: max('minor_peak')
-  minor_body_score: max('minor_body_high') + 0.5 * topk_sum('minor_body_medium', k=3,
-    gt=0.3)
-  minor_context_score: max('minor_situation_high') + 0.5 * topk_sum('minor_situation_other',
-    k=2, gt=0.3) + 0.25 * topk_sum('minor_situation_medium', k=3, gt=0.3) + 0.25 *
-    (count('minor_uniforms', gt=0.35) + count('minor_school_context', gt=0.35))
-  minor_special_score: max('minor_body_special')
+  minor_main_peak: max('minor_peak')
+  minor_sit_high_peak: max('minor_situation_high')
+  minor_sit_other_peak: max('minor_situation_other')
+  minor_suspect_seed: max('minor_body_high')
+  minor_mbm_topk: topk_sum('minor_body_medium', k=3, gt=0.35)
+  minor_uniform_ctx: count('minor_uniforms', gt=0.35) + count('minor_school_context',
+    gt=0.35)
+  minor_suspect_base: clamp((minor_suspect_seed / 0.35) * (minor_mbm_topk / 1.05), 0,
+    1)
+  minor_pos_offset: clamp(minor_uniform_ctx * 0.15, 0, 0.30)
+  minor_neg_offset: clamp((max('minor_body_special') / 0.35) * 0.30, 0, 0.30)
+  minor_suspect_score: clamp(minor_suspect_base + minor_pos_offset - minor_neg_offset,
+    0, 1)
   gore_peak_conf: max('gore_peak')
   gore_density: count('blood_tags', gt=0.35) + count('injury_tags', gt=0.35)
   gore_intensity: max('gore_peak') + 0.5 * (count('blood_tags', gt=0.35) + count('injury_tags',
@@ -643,25 +660,83 @@ rules:
   - sexual={sexual_intensity:.2f}
   - coercion={coercion_score:.2f}
   stop: true
-- id: A-RED-001
+# 旧 A-RED-001 / A-YEL-001 は v2.1 で無効化（Minor 合算スコア撤廃）
+# - id: A-RED-001
+#   severity: red
+#   priority: 90
+#   when: (minor_peak_conf >= 0.3 || minor_body_score >= 0.7 || minor_context_score >= 0.8)
+#     && (sexual_intensity >= 0.3 || explicit_score >= 0.3 || exposure_area >= 0.2 || exposure_count >= 2)
+#   reasons:
+#   - minor_peak={minor_peak_conf:.2f}
+#   - minor_body={minor_body_score:.2f}
+#   - sex={sexual_intensity:.2f}
+#   stop: true
+# - id: A-YEL-001
+#   severity: yellow
+#   priority: 80
+#   when: minor_special_score >= 0.35 && (sexual_intensity >= 0.2 || explicit_score >= 0.2 || exposure_area >= 0.1)
+#   reasons:
+#   - minor_special={minor_special_score:.2f}
+#   - sex={sexual_intensity:.2f}
+
+- id: A-RED-EXPL-001
   severity: red
-  priority: 90
-  when: (minor_peak_conf >= 0.3 || minor_body_score >= 0.7 || minor_context_score
-    >= 0.8) && (sexual_intensity >= 0.3 || explicit_score >= 0.3 || exposure_area
-    >= 0.2 || exposure_count >= 2)
+  priority: 97
+  when: (minor_main_peak >= 0.30) && rating_is_explicit
   reasons:
-  - minor_peak={minor_peak_conf:.2f}
-  - minor_body={minor_body_score:.2f}
-  - sex={sexual_intensity:.2f}
+  - minor_main={minor_main_peak:.2f}
+  - rating=explicit
   stop: true
-- id: A-YEL-001
-  severity: yellow
-  priority: 80
-  when: minor_special_score >= 0.35 && (sexual_intensity >= 0.2 || explicit_score
-    >= 0.2 || exposure_area >= 0.1)
+- id: A-ORG-QUES-001
+  severity: orange
+  priority: 96
+  when: (minor_main_peak >= 0.30) && rating_is_questionable
   reasons:
-  - minor_special={minor_special_score:.2f}
-  - sex={sexual_intensity:.2f}
+  - minor_main={minor_main_peak:.2f}
+  - rating=questionable
+  stop: true
+- id: A-RED-SIT-H-QPLUS-001
+  severity: red
+  priority: 95
+  when: (minor_sit_high_peak >= 0.30) && rating_is_qplus
+  reasons:
+  - minor_sit_high={minor_sit_high_peak:.2f}
+  - rating=q_plus
+  stop: true
+- id: A-RED-EXPL-SIT-O-001
+  severity: red
+  priority: 94
+  when: (minor_sit_other_peak >= 0.30) && rating_is_explicit
+  reasons:
+  - minor_sit_other={minor_sit_other_peak:.2f}
+  - rating=explicit
+  stop: true
+- id: A-ORG-QUES-SIT-O-001
+  severity: orange
+  priority: 93
+  when: (minor_sit_other_peak >= 0.30) && rating_is_questionable
+  reasons:
+  - minor_sit_other={minor_sit_other_peak:.2f}
+  - rating=questionable
+  stop: true
+- id: A-ORG-EXPL-SUS-001
+  severity: orange
+  priority: 92
+  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= 0.60) && rating_is_explicit
+  reasons:
+  - minor_suspect_score={minor_suspect_score:.2f}
+  - seed={minor_suspect_seed:.2f}
+  - rating=explicit
+  stop: true
+- id: A-YEL-QUES-SUS-001
+  severity: yellow
+  priority: 91
+  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= 0.45) && rating_is_questionable
+  reasons:
+  - minor_suspect_score={minor_suspect_score:.2f}
+  - seed={minor_suspect_seed:.2f}
+  - rating=questionable
+  stop: true
 - id: B-RED-NSFW-001
   severity: red
   priority: 70
