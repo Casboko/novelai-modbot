@@ -19,7 +19,11 @@ rule_titles:
   E-YEL-QPLUS-PRES-001: 動物存在 × Q以上
   D-RED-SEX-GORE-STRICT-001: 性的 × 重ゴア（厳格ANDゲート＋オフセット）
   D-ORG-GORE-STRICT-001: 重ゴア（厳格ANDゲート＋オフセット）
-nsfw_general_tags:
+thresholds:
+  wd14_questionable: 0.35
+  wd14_explicit: 0.2
+groups:
+  nsfw_general:
   - nipples
   - nipple_slip
   - nipple_tweak
@@ -98,7 +102,6 @@ nsfw_general_tags:
   - gangbang
   - girl_on_top
   - gokkun
-  - groping
   - group_sex
   - guided_penetration
   - hairjob
@@ -144,10 +147,6 @@ nsfw_general_tags:
   - upright_straddle
   - urethral_insertion
   - vaginal
-thresholds:
-  wd14_questionable: 0.35
-  wd14_explicit: 0.2
-groups:
   explicit_nudity:
   - nipples
   - nipple_slip
@@ -622,7 +621,7 @@ features:
   rating_is_explicit: rating.explicit >= const_WD14_EXPL
   rating_is_questionable: rating.questionable >= const_WD14_QUES
   rating_is_qplus: rating_is_explicit || rating_is_questionable
-  is_Qplus: (rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)
+  is_qplus: (rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)
   qe_margin: max(rating.questionable - const_WD14_QUES, rating.explicit - const_WD14_EXPL)
   is_low_margin: qe_margin < const_LOW_MARGIN
   bestiality_peak: max('bestiality_direct')
@@ -636,9 +635,9 @@ features:
   rest_topk: topk_sum('restraint_gear', k=3, gt=0.50)
   offset_strength: clamp((sub_cnt * 0.12) + ((rest_topk / 1.50) * 0.18), 0, 0.30)
   coercion_final_score: clamp(base_strength + offset_strength, 0, 1)
-  coercion_org_threshold: const_COERCION_ORG + (0.03 if is_low_margin else 0.0)
-  is_E: rating.explicit >= const_WD14_EXPL
-  is_Q: rating.questionable >= const_WD14_QUES
+  coercion_org_threshold: const_COERCION_ORG + (0.03 * clamp(is_low_margin, 0, 1))
+  is_e: rating.explicit >= const_WD14_EXPL
+  is_q: rating.questionable >= const_WD14_QUES
   sexual_main: topk_sum('sexual_act_lexicon', k=3, gt=0.50)
   exposure_prominent: exposure_area >= const_EXPOSURE_HIGH
   is_explicit_exposed: nude.has('FEMALE_GENITALIA_EXPOSED') || nude.has('MALE_GENITALIA_EXPOSED') || nude.has('ANUS_EXPOSED') || nude.has('FEMALE_BREAST_EXPOSED')
@@ -670,15 +669,15 @@ features:
   pain_cnt: count('pain_expressions', gt=0.35)
   gore_offset: clamp(death_cnt * 0.20 + pain_cnt * 0.10, 0, 0.40)
   gore_final_score: clamp(gore_base_score + gore_offset, 0, 1)
-  gore_org_threshold: const_GORE_ORG + (0.03 if is_low_margin else 0.0)
-  gore_red_threshold: const_GORE_RED + (0.03 if is_low_margin else 0.0)
+  gore_org_threshold: const_GORE_ORG + (0.03 * clamp(is_low_margin, 0, 1))
+  gore_red_threshold: const_GORE_RED + (0.03 * clamp(is_low_margin, 0, 1))
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
 rules:
 - id: C-ORG-QUES-STRICT-001
   severity: orange
   priority: 85
-  when: is_Qplus && (coercion_final_score >= coercion_org_threshold)
+  when: is_qplus && (coercion_final_score >= coercion_org_threshold)
   reasons:
   - "main={coercion_main_peak:.2f}"
   - "sec={sec_peak:.2f}"
@@ -775,14 +774,14 @@ rules:
 - id: B-RED-NSFW-EXPL-001
   severity: red
   priority: 76
-  when: (!channel.is_nsfw) && is_E
+  when: (!channel.is_nsfw) && is_e
   reasons:
   - "explicit={rating.explicit:.2f}"
   stop: true
 - id: B-ORG-NSFW-QUES-STRICT-001
   severity: orange
   priority: 75
-  when: (!channel.is_nsfw) && is_Q && exposure_prominent && (sexual_main >= const_SEXUAL_MAIN_STRONG) && is_explicit_exposed && !is_low_margin
+  when: (!channel.is_nsfw) && is_q && exposure_prominent && (sexual_main >= const_SEXUAL_MAIN_STRONG) && is_explicit_exposed && !is_low_margin
   reasons:
   - "explicit={rating.explicit:.2f}"
   - "q={rating.questionable:.2f}"
@@ -812,7 +811,7 @@ rules:
 - id: D-RED-SEX-GORE-STRICT-001
   severity: red
   priority: 78
-  when: gore_heavy_gate && (gore_final_score >= gore_red_threshold) && (is_E || sexual_main >= const_SEXUAL_MAIN_STRONG)
+  when: gore_heavy_gate && (gore_final_score >= gore_red_threshold) && (is_e || sexual_main >= const_SEXUAL_MAIN_STRONG)
   reasons:
   - "gate(main={gore_main_peak:.2f},dense={gore_density_cnt:.0f},int=max({injury_topk:.2f},{blood_topk:.2f}))"
   - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
@@ -846,7 +845,7 @@ rules:
 - id: E-RED-QPLUS-BEST-001
   severity: red
   priority: 79
-  when: is_Qplus && (bestiality_peak >= const_BESTIALITY)
+  when: is_qplus && (bestiality_peak >= const_BESTIALITY)
   reasons:
   - "bestiality={bestiality_peak:.2f}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
@@ -854,7 +853,7 @@ rules:
 - id: E-ORG-QPLUS-SUS-001
   severity: orange
   priority: 78
-  when: is_Qplus && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
+  when: is_qplus && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
   reasons:
   - "bestiality={bestiality_peak:.2f}"
   - "presence={animal_presence:.2f}"
@@ -865,7 +864,7 @@ rules:
 - id: E-YEL-QPLUS-PRES-001
   severity: yellow
   priority: 77
-  when: is_Qplus && (animal_presence >= const_ANIMAL_PRES)
+  when: is_qplus && (animal_presence >= const_ANIMAL_PRES)
   reasons:
   - "presence={animal_presence:.2f}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
