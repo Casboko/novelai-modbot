@@ -11,6 +11,8 @@ rule_titles:
   A-ORG-QUES-SIT-O-001: 未成年状況（other）× Questionable
   A-ORG-EXPL-SUS-001: 未成年疑い（seed×medium±offset）× Explicit
   A-YEL-QUES-SUS-001: 未成年疑い（seed×medium±offset）× Questionable
+  B-RED-NSFW-EXPL-001: 非NSFWチャンネルの露骨な性表現（Explicitのみ）
+  B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネルの性的（Questionable：露骨露出×大面積×主行為強）
   B-RED-NSFW-001: 非NSFWチャンネルの露骨な性表現
   B-ORG-001: 非NSFWチャンネルの性的コンテンツ
   D-RED-001: 性的文脈を伴うゴア
@@ -631,6 +633,11 @@ features:
   rating_is_explicit: rating.explicit >= 0.20
   rating_is_questionable: rating.questionable >= 0.35
   rating_is_qplus: rating_is_explicit || rating_is_questionable
+  is_E: rating.explicit >= 0.20
+  is_Q: rating.questionable >= 0.35
+  sexual_main: topk_sum('sexual_act_lexicon', k=3, gt=0.50)
+  exposure_prominent: exposure_area >= 0.20
+  is_explicit_exposed: nude.has('FEMALE_GENITALIA_EXPOSED') || nude.has('MALE_GENITALIA_EXPOSED') || nude.has('ANUS_EXPOSED') || nude.has('FEMALE_BREAST_EXPOSED')
   minor_peak_conf: max('minor_peak')
   minor_main_peak: max('minor_peak')
   minor_sit_high_peak: max('minor_situation_high')
@@ -737,25 +744,41 @@ rules:
   - seed={minor_suspect_seed:.2f}
   - rating=questionable
   stop: true
-- id: B-RED-NSFW-001
+- id: B-RED-NSFW-EXPL-001
   severity: red
-  priority: 70
-  when: (!channel.is_nsfw) && (explicit_score >= 0.5 || sexual_intensity >= 0.8 ||
-    exposure_area >= 0.2)
+  priority: 76
+  when: (!channel.is_nsfw) && is_E
   reasons:
-  - explicit={explicit_score:.2f}
-  - sexual={sexual_intensity:.2f}
-  - exposure={exposure_area:.2f}
+  - "rating=explicit({rating.explicit:.2f})"
   stop: true
-- id: B-ORG-001
+- id: B-ORG-NSFW-QUES-STRICT-001
   severity: orange
-  priority: 60
-  when: (!channel.is_nsfw) && (sexual_intensity >= 0.4 || nsfw_rating_max >= 0.5 ||
-    exposure_area >= 0.15)
+  priority: 75
+  when: (!channel.is_nsfw) && is_Q && exposure_prominent && (sexual_main >= 0.60) && is_explicit_exposed
   reasons:
-  - sexual={sexual_intensity:.2f}
-  - rating={nsfw_rating_max:.2f}
-  - exposure={exposure_area:.2f}
+  - "rating=questionable({rating.questionable:.2f})"
+  - "exposure_prominent={exposure_prominent}"
+  - "sexual_main={sexual_main:.2f}"
+  - "explicit_exposed={is_explicit_exposed}"
+  stop: true
+# 旧 B-RED-NSFW-001 / B-ORG-001 は v2.1 で無効化（ExplicitのみをREDとし、Q/Sは基本GREEN）
+# - id: B-RED-NSFW-001
+#   severity: red
+#   priority: 70
+#   when: (!channel.is_nsfw) && (explicit_score >= 0.5 || sexual_intensity >= 0.8 || exposure_area >= 0.2)
+#   reasons:
+#   - explicit={explicit_score:.2f}
+#   - sexual={sexual_intensity:.2f}
+#   - exposure={exposure_area:.2f}
+#   stop: true
+# - id: B-ORG-001
+#   severity: orange
+#   priority: 60
+#   when: (!channel.is_nsfw) && (sexual_intensity >= 0.4 || nsfw_rating_max >= 0.5 || exposure_area >= 0.15)
+#   reasons:
+#   - sexual={sexual_intensity:.2f}
+#   - rating={nsfw_rating_max:.2f}
+#   - exposure={exposure_area:.2f}
 - id: D-RED-001
   severity: red
   priority: 55
