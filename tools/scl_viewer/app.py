@@ -265,7 +265,6 @@ DEFAULT_RULES_PREV = Path("configs/rules_v2_prev.yaml")
 COLUMN_PRESETS: dict[str, list[str] | None] = {
     "Core": [
         "sev_badge",
-        "thumbnail",
         "severity",
         "rule_id",
         "wd14_rating_e",
@@ -278,7 +277,6 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
     ],
     "Moderation Core": [
         "sev_badge",
-        "thumbnail",
         "phash",
         "severity",
         "rule_id",
@@ -314,7 +312,6 @@ COLUMN_PRESETS: dict[str, list[str] | None] = {
     ],
     "v2 Features": [
         "sev_badge",
-        "thumbnail",
         "phash",
         "severity",
         "rule_id",
@@ -803,12 +800,6 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
         df_display = filtered_reset[available_columns].copy()
 
         table_column_config: dict[str, Any] = {}
-        if "thumbnail" in df_display.columns:
-            table_column_config["thumbnail"] = st.column_config.ImageColumn(
-                "thumb",
-                help="p0 添付から生成したサムネイル",
-                width=48,
-            )
         if "message_link" in df_display.columns:
             table_column_config["message_link"] = st.column_config.LinkColumn("link")
 
@@ -974,7 +965,6 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
         metrics = record.get("metrics", {}) or {}
         dsl = metrics.get("dsl", {}) or {}
         feats = (dsl.get("features", {}) or {})
-        thumb_path = get_thumbnail_for_record(record)
         ratings = _extract_wd14_rating(record)
         qe_margin_value = metrics.get("qe_margin")
         if qe_margin_value is None and isinstance(feats, Mapping):
@@ -984,7 +974,6 @@ def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = N
             channel_info = record.get("channel") or {}
             is_nsfw_flag = channel_info.get("is_nsfw")
         row = {
-            "thumbnail": str(thumb_path) if thumb_path else None,
             "phash": record.get("phash"),
             "severity": record.get("severity"),
             "rule_id": record.get("rule_id"),
