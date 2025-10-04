@@ -85,4 +85,4 @@ def test_run_p2_sharded_injects_rules_config(monkeypatch: pytest.MonkeyPatch, tm
     injected = [cmd for cmd in captured if "--rules-config" in cmd]
     assert injected, "--rules-config not injected"
     for cmd in injected:
-        assert "configs/rules.yaml" in cmd
+        assert "configs/rules_v2.yaml" in cmd

@@ -134,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nudenet-cache", type=Path, default=Path("app/cache_nudenet.sqlite"))
     parser.add_argument("--nudenet-config", type=Path, default=Path("configs/nudenet.yaml"))
     parser.add_argument("--xsignals-config", type=Path, default=Path("configs/xsignals.yaml"))
-    parser.add_argument("--rules-config", type=Path, default=Path("configs/rules.yaml"))
+    parser.add_argument("--rules-config", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--qps", type=float, default=5.0)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument(

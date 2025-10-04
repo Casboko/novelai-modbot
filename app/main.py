@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
+import re
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, NamedTuple, Optional, Sequence
+from typing import Any, Iterable, List, Mapping, NamedTuple, Optional, Sequence
 
 import discord
 from discord import app_commands
 
 from .config import get_settings
 from .discord_client import create_client
+from .engine.group_utils import group_top_tags
+from .engine.tag_norm import normalize_pair, normalize_tag
 from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
@@ -84,22 +89,6 @@ def _severity_option_label(value: str) -> str:
 def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
     return max(min_value, min(max_value, value))
 
-
-def _bar(value: float, width: int = 8) -> str:
-    clamped = _clamp(value)
-    filled = int(round(clamped * width))
-    filled = min(filled, width)
-    return "█" * filled + "▁" * (width - filled)
-
-
-def _bar_nonnegative(value: float, width: int = 8) -> str:
-    if value <= 0:
-        return "▁" * width
-    clamped = _clamp(value)
-    filled = int(round(clamped * width))
-    filled = min(max(filled, 1), width)
-    return "█" * filled + "▁" * (width - filled)
-
 def _format_top_detections(detections: Iterable[dict], limit: int = 3) -> List[str]:
     formatted: List[tuple[str, float]] = []
     for item in detections or []:
@@ -125,6 +114,288 @@ def _format_timestamp(value: Optional[str]) -> Optional[str]:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+_RULES_PATH = Path(RuleEngine.DEFAULT_RULES_PATH)
+_GROUP_FUNCTIONS = {"max", "sum", "count", "topk_sum"}
+_GROUP_WILDCARD_CHARS = set("*?[")
+_FEATURE_PRIORITY = (
+    "explicit_score",
+    "sexual_intensity",
+    "nsfw_rating_max",
+    "minor_peak_conf",
+    "minor_body_score",
+    "minor_context_score",
+    "gore_final_score",
+    "gore_main_peak",
+    "animal_presence",
+    "coercion_final_score",
+    "qe_margin",
+)
+_DISPLAY_GROUPS = ("gore", "violence", "minors", "animal_subjects", "nsfw_general")
+_COMPARISON_RE = re.compile(r"([^&|!=<>]+?)\s*(>=|<=|>|<|==)\s*([^&|]+)")
+
+
+@lru_cache(maxsize=1)
+def _rule_engine_cached(signature: str) -> RuleEngine:
+    return RuleEngine(str(_RULES_PATH))
+
+
+def _get_rule_engine() -> RuleEngine:
+    try:
+        stat = _RULES_PATH.stat()
+        signature = f"{_RULES_PATH.resolve()}::{int(stat.st_mtime)}::{stat.st_size}"
+    except OSError:
+        signature = "missing"
+    return _rule_engine_cached(signature)
+
+
+def _v2_features(record: Mapping[str, Any]) -> dict[str, float]:
+    dsl = (record.get("metrics") or {}).get("dsl") or {}
+    feats = dsl.get("features") or {}
+    result: dict[str, float] = {}
+    for key, value in feats.items():
+        if isinstance(value, (int, float)):
+            result[str(key)] = float(value)
+    return result
+
+
+def _v2_errors(record: Mapping[str, Any]) -> list[str]:
+    metrics = record.get("metrics") or {}
+    dsl = metrics.get("dsl")
+    if not isinstance(dsl, Mapping):
+        return ["metrics.dsl が見つかりません（v2未評価）"]
+    features = dsl.get("features")
+    if not isinstance(features, Mapping) or not features:
+        return ["metrics.dsl.features が空です（v2未評価）"]
+    return []
+
+
+def _truncate_block(lines: Sequence[str], *, code: bool = True, max_chars: int = 950) -> str:
+    collected: list[str] = []
+    total = 0
+    for line in lines:
+        text = line.rstrip()
+        addition = len(text) + 1
+        if total + addition > max_chars:
+            break
+        collected.append(text)
+        total += addition
+    if not collected:
+        return ""
+    body = "\n".join(collected)
+    return f"```\n{body}\n```" if code else body
+
+
+def _collect_tag_scores(record: Mapping[str, Any]) -> dict[str, float]:
+    general = ((record.get("wd14") or {}).get("general_raw") or (record.get("wd14") or {}).get("general") or [])
+    scores: dict[str, float] = {}
+    for item in general:
+        pair = normalize_pair(item)
+        if pair is None:
+            continue
+        tag, score = pair
+        if score < 0:
+            continue
+        existing = scores.get(tag)
+        if existing is None or score > existing:
+            scores[tag] = score
+    return scores
+
+
+def _group_values(tag_scores: Mapping[str, float], patterns: Sequence[str]) -> list[float]:
+    if not patterns:
+        return []
+    hits: list[float] = []
+    for pattern in patterns:
+        canonical = normalize_tag(pattern)
+        if not canonical:
+            continue
+        if any(ch in canonical for ch in _GROUP_WILDCARD_CHARS):
+            for tag, score in tag_scores.items():
+                if fnmatch.fnmatchcase(tag, canonical):
+                    hits.append(float(score))
+        else:
+            score = tag_scores.get(canonical)
+            if score is not None:
+                hits.append(float(score))
+    return hits
+
+
+def _parse_group_call(call_args: str) -> tuple[str | None, dict[str, float]]:
+    match = re.search(r"'([^']+)'", call_args)
+    if not match:
+        return None, {}
+    group_name = match.group(1)
+    params: dict[str, float] = {}
+    k_match = re.search(r"\bk\s*=\s*([0-9]+)", call_args)
+    if k_match:
+        params["k"] = float(k_match.group(1))
+    gt_match = re.search(r"\bgt\s*=\s*([0-9]*\.?[0-9]+)", call_args)
+    if gt_match:
+        params["gt"] = float(gt_match.group(1))
+    return group_name, params
+
+
+def _evaluate_group_function(
+    func: str,
+    call_args: str,
+    *,
+    tag_scores: Mapping[str, float],
+    groups: Mapping[str, Sequence[str]],
+) -> float | None:
+    group_name, params = _parse_group_call(call_args)
+    if not group_name:
+        return None
+    patterns = groups.get(group_name) or groups.get(normalize_tag(group_name)) or ()
+    values = _group_values(tag_scores, patterns)
+    if func == "max":
+        return max(values, default=0.0)
+    if func == "sum":
+        return float(sum(values))
+    if func == "count":
+        threshold = params.get("gt", 0.0)
+        return float(sum(1 for score in values if score > threshold))
+    if func == "topk_sum":
+        threshold = params.get("gt", 0.0)
+        k = int(params.get("k", 5))
+        filtered = [score for score in values if score > threshold]
+        filtered.sort(reverse=True)
+        return float(sum(filtered[:k]))
+    return None
+
+
+def _resolve_condition_value(
+    token: str,
+    *,
+    record: Mapping[str, Any],
+    features: Mapping[str, float],
+    metrics: Mapping[str, Any],
+    consts: Mapping[str, float],
+    groups: Mapping[str, Sequence[str]],
+    tag_scores: Mapping[str, float],
+) -> float | None:
+    text = token.strip()
+    if not text:
+        return None
+    if text.startswith("(") and text.endswith(")"):
+        return _resolve_condition_value(
+            text[1:-1],
+            record=record,
+            features=features,
+            metrics=metrics,
+            consts=consts,
+            groups=groups,
+            tag_scores=tag_scores,
+        )
+    func_match = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)\((.*)\)", text)
+    if func_match:
+        func = func_match.group(1)
+        args = func_match.group(2)
+        if func in _GROUP_FUNCTIONS:
+            return _evaluate_group_function(
+                func,
+                args,
+                tag_scores=tag_scores,
+                groups=groups,
+            )
+    if text in features:
+        return float(features[text])
+    if text in consts:
+        return float(consts[text])
+    rating = ((record.get("wd14") or {}).get("rating") or {})
+    if text.startswith("rating."):
+        key = text.split(".", 1)[1]
+        value = rating.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+    if text.startswith("metrics."):
+        key = text.split(".", 1)[1]
+        value = metrics.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+    if text in {"exposure_area", "exposure_count"}:
+        value = metrics.get(text)
+        if isinstance(value, (int, float)):
+            return float(value)
+    if text in tag_scores:
+        return float(tag_scores[text])
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_when_summary_lines(
+    when_text: str,
+    *,
+    record: Mapping[str, Any],
+    features: Mapping[str, float],
+    metrics: Mapping[str, Any],
+    consts: Mapping[str, float],
+    groups: Mapping[str, Sequence[str]],
+    tag_scores: Mapping[str, float],
+    limit: int = 6,
+) -> list[str]:
+    lines: list[str] = []
+    for match in _COMPARISON_RE.finditer(when_text):
+        left = match.group(1).strip()
+        op = match.group(2)
+        right = match.group(3).strip()
+        left_val = _resolve_condition_value(
+            left,
+            record=record,
+            features=features,
+            metrics=metrics,
+            consts=consts,
+            groups=groups,
+            tag_scores=tag_scores,
+        )
+        right_val = _resolve_condition_value(
+            right,
+            record=record,
+            features=features,
+            metrics=metrics,
+            consts=consts,
+            groups=groups,
+            tag_scores=tag_scores,
+        )
+        result = None
+        if left_val is not None and right_val is not None:
+            if op == ">=":
+                result = left_val >= right_val
+            elif op == "<=":
+                result = left_val <= right_val
+            elif op == ">":
+                result = left_val > right_val
+            elif op == "<":
+                result = left_val < right_val
+            elif op == "==":
+                result = abs(left_val - right_val) <= 1e-6
+        icon = "✅" if result is True else ("❌" if result is False else "−")
+        left_fmt = "-" if left_val is None else f"{left_val:.3f}"
+        right_fmt = "-" if right_val is None else f"{right_val:.3f}"
+        lines.append(f"{icon} {left} {op} {right} (val={left_fmt}, rhs={right_fmt})")
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _format_wd14_rating_block(record: Mapping[str, Any]) -> str:
+    rating = ((record.get("wd14") or {}).get("rating") or {})
+    ordering = ("general", "sensitive", "questionable", "explicit")
+    labels = {"general": "g", "sensitive": "s", "questionable": "q", "explicit": "e"}
+    values = [max(float(rating.get(key, 0.0)), 0.0) for key in ordering]
+    total = sum(values) or 1.0
+    lines = []
+    for key, value in zip(ordering, values):
+        label = labels[key]
+        ratio = value / total if total else 0.0
+        filled = int(round(_clamp(ratio, 0.0, 1.0) * 10))
+        filled = min(filled, 10)
+        bar = "█" * filled + "▁" * (10 - filled)
+        lines.append(f"{label}:{value:.2f} {bar}")
+    return "```\n" + "\n".join(lines) + "\n```"
 async def _fetch_message(client: discord.Client, channel_id: int, message_id: int) -> discord.Message:
     channel = client.get_channel(channel_id)
     if channel is None:
@@ -631,30 +902,98 @@ def build_record_embed(
         embed.set_author(**author_kwargs)
 
     metrics = record.get("metrics", {})
-    margin = metrics.get("nsfw_margin", 0.0)
-    ratio = metrics.get("nsfw_ratio", 0.0)
-    nsfw_sum = metrics.get("nsfw_general_sum", 0.0)
-    exposure = metrics.get("exposure_peak", record.get("xsignals", {}).get("exposure_score", 0.0))
-    violence = metrics.get("violence_max", 0.0)
-    minors = metrics.get("minors_sum", 0.0)
-    animals = metrics.get("animals_sum", 0.0)
-    adult_index = _clamp(
-        ratio * 0.5 + max(margin, 0.0) * 0.3 + _clamp(nsfw_sum, 0.0, 1.0) * 0.2
-    )
-    metrics_block = (
-        "```\n"
-        f"🔞 erotic   {adult_index:6.2f} { _bar(adult_index) }\n"
-        f"🍑 nudity   {exposure:6.2f} { _bar(exposure) }\n"
-        f"🩸 gore     {violence:6.2f} { _bar(violence) }\n"
-        f"👶 children {minors:6.2f} { _bar(minors) }\n"
-        f"🦊 animals  {animals:6.2f} { _bar(animals) }\n"
-        "```"
-    )
-    embed.add_field(name="指標", value=metrics_block, inline=False)
+    features = _v2_features(record)
+    v2_errors = _v2_errors(record)
+    tag_scores = _collect_tag_scores(record)
 
-    detections = _format_top_detections(record.get("nudity_detections", []), limit=3)
-    if detections:
-        embed.add_field(name="🩱 NudeNet 検出", value=", ".join(detections), inline=False)
+    try:
+        engine = _get_rule_engine()
+    except Exception:  # noqa: BLE001
+        engine = None
+
+    groups_config: dict[str, tuple[str, ...]] = {}
+    consts: Mapping[str, float] = {}
+    rule_map: dict[str, Mapping[str, Any]] = {}
+    if engine is not None:
+        raw_config = engine.raw_config or {}
+        raw_groups = raw_config.get("groups")
+        if isinstance(raw_groups, Mapping):
+            groups_config = {
+                str(name): tuple(str(item) for item in values if isinstance(item, str))
+                for name, values in raw_groups.items()
+                if isinstance(values, (list, tuple))
+            }
+        consts = getattr(engine, "const_map", {}) or {}
+        raw_rules = raw_config.get("rules")
+        if isinstance(raw_rules, list):
+            for entry in raw_rules:
+                if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
+                    rule_map[str(entry["id"])] = entry
+
+    selected_features: list[tuple[str, float]] = []
+    seen_features: set[str] = set()
+    for key in _FEATURE_PRIORITY:
+        if key in features and key not in seen_features:
+            selected_features.append((key, features[key]))
+            seen_features.add(key)
+        if len(selected_features) >= 8:
+            break
+    if len(selected_features) < 8:
+        for name in sorted(features, key=features.get, reverse=True):
+            if name in seen_features:
+                continue
+            selected_features.append((name, features[name]))
+            seen_features.add(name)
+            if len(selected_features) >= 8:
+                break
+    if selected_features:
+        feature_lines = [f"{name}: {value:.3f}" for name, value in selected_features[:8]]
+        block = _truncate_block(feature_lines)
+        if block:
+            embed.add_field(name="V2 features（上位）", value=block, inline=False)
+
+    if groups_config:
+        group_lines: list[str] = []
+        for group_name in _DISPLAY_GROUPS:
+            patterns = groups_config.get(group_name) or groups_config.get(normalize_tag(group_name)) or ()
+            hits = group_top_tags(tag_scores, patterns, k=5, min_score=0.10)
+            if hits:
+                group_lines.append(
+                    f"{group_name}: " + ", ".join(f"{tag}:{score:.2f}" for tag, score in hits)
+                )
+        block = _truncate_block(group_lines, code=False, max_chars=900)
+        if block:
+            embed.add_field(name="タググループ（top hits）", value=block, inline=False)
+
+    embed.add_field(name="WD14 rating", value=_format_wd14_rating_block(record), inline=False)
+    nudity_list = _format_top_detections(record.get("nudity_detections", []), limit=4)
+    embed.add_field(
+        name="NudeNet 検出",
+        value=", ".join(nudity_list) if nudity_list else "なし",
+        inline=False,
+    )
+
+    winning = metrics.get("winning") or {}
+    rule_id = winning.get("rule_id") if isinstance(winning, Mapping) else None
+    if rule_id and rule_id in rule_map:
+        when_text = rule_map[rule_id].get("when") if isinstance(rule_map[rule_id], Mapping) else None
+        if isinstance(when_text, str) and when_text.strip():
+            lines = _build_when_summary_lines(
+                when_text,
+                record=record,
+                features=features,
+                metrics=metrics,
+                consts=consts,
+                groups=groups_config,
+                tag_scores=tag_scores,
+                limit=6,
+            )
+            block = _truncate_block(lines)
+            if block:
+                embed.add_field(name=f"when 概要（{rule_id}）", value=block, inline=False)
+
+    if v2_errors:
+        embed.add_field(name="⚠️ V2エラー", value=" / ".join(v2_errors), inline=False)
 
     if preview.image_url:
         embed.set_image(url=preview.image_url)
@@ -1606,7 +1945,7 @@ def register_commands(
         default_end_offset = timedelta()
         resolved_range = resolve_time_range(since, until, default_end_offset=default_end_offset)
 
-        policy, load_result, _ = resolve_policy(Path("configs/rules.yaml"), None)
+        policy, load_result, _ = resolve_policy(Path("configs/rules_v2.yaml"), None)
         if has_version_mismatch(load_result):
             await interaction.followup.send(
                 "rules.yaml が version: 2 ではありません。設定を更新してください。",
@@ -1626,7 +1965,7 @@ def register_commands(
                 run_scan,
                 Path("out/p2_analysis.jsonl"),
                 Path("out/p3_findings.jsonl"),
-                Path("configs/rules.yaml"),
+                Path("configs/rules_v2.yaml"),
                 channel_ids=channel_ids,
                 since=since,
                 until=until,

@@ -201,7 +201,7 @@ async def execute_task(
             cmd.extend(["--batch-size", str(args.batch_size)])
 
         extra_args = list(args.extra_args or [])
-        rules_cfg_path = Path("configs/rules.yaml")
+        rules_cfg_path = Path("configs/rules_v2.yaml")
         if not _has_rules_config(extra_args):
             cmd.extend(["--rules-config", str(rules_cfg_path)])
             entry["rules_config"] = str(rules_cfg_path)

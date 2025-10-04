@@ -11,7 +11,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--findings", type=Path, default=Path("out/p3_findings.jsonl"))
     parser.add_argument("--out", type=Path, default=Path("out/p3_report.csv"))
     parser.add_argument("--severity", type=str, default="all", help="Severity filter: all/red/orange/yellow/green")
-    parser.add_argument("--rules", type=Path, default=Path("configs/rules.yaml"))
+    parser.add_argument("--rules", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--channel", action="append", help="Channel ID to include (repeatable)")
     parser.add_argument(
         "--since",

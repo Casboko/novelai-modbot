@@ -88,7 +88,7 @@ class AttachmentStats:
 def run_scan(
     analysis_path: Path | str = ANALYSIS_PATH,
     findings_path: Path | str = FINDINGS_PATH,
-    rules_path: Path | str = Path("configs/rules.yaml"),
+    rules_path: Path | str = Path("configs/rules_v2.yaml"),
     channel_ids: Optional[Sequence[str]] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
@@ -472,7 +472,7 @@ def generate_report(
     findings_path: Path | str = FINDINGS_PATH,
     report_path: Path | str = REPORT_PATH,
     severity: Optional[str] = None,
-    rules_path: Path | str = Path("configs/rules.yaml"),
+    rules_path: Path | str = Path("configs/rules_v2.yaml"),
     channel_ids: Optional[Sequence[str]] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,

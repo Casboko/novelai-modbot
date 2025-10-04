@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--general-threshold", type=float, default=0.35)
     parser.add_argument("--character-threshold", type=float, default=0.85)
     parser.add_argument("--raw-general-topk", type=int, default=64)
-    parser.add_argument("--rules-config", type=Path, default=Path("configs/rules.yaml"))
+    parser.add_argument("--rules-config", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--qps", type=float, default=5.0)

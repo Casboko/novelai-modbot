@@ -10,7 +10,7 @@ from .engine.loader import build_const_map, load_rule_config
 from .engine.tag_norm import normalize_tag
 from .engine.types import DslPolicy, RuleConfigV2
 
-DEFAULT_RULES_PATH = "configs/rules.yaml"
+DEFAULT_RULES_PATH = "configs/rules_v2.yaml"
 
 
 @dataclass(slots=True)

@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate", help="Validate a rules configuration file")
-    validate.add_argument("--rules", type=Path, default=Path("configs/rules.yaml"))
+    validate.add_argument("--rules", type=Path, default=Path("configs/rules_v2.yaml"))
     validate.add_argument("--mode", choices=["warn", "strict"], help="Override DSL mode")
     validate.add_argument("--print-config", action="store_true", help="Print configuration summary")
     validate.add_argument("--json", action="store_true", help="Emit validation result as JSON")
