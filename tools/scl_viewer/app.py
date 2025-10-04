@@ -49,7 +49,7 @@ SEVERITY_BADGES = {
 
 LAYOUT_MODES = ("classic", "stacked")
 DEFAULT_LAYOUT_MODE = "stacked"
-DEFAULT_LIST_HEIGHT_PX = 120
+DEFAULT_LIST_HEIGHT_PX = 216
 CHART_TOPK_MAX = 10
 
 CATEGORY_GROUPS_DEFAULT: dict[str, set[str]] = {
@@ -784,30 +784,12 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
     mode = layout_mode if layout_mode in LAYOUT_MODES else DEFAULT_LAYOUT_MODE
 
     if mode == "stacked":
-        left_col, right_col = st.columns([1, 6], gap="small")
+        table_container = st.container()
+        detail_container = st.container()
     else:
         left_col, right_col = st.columns([3, 7], gap="large")
-
-    if mode == "stacked":
-        with left_col:
-            st.subheader("Controls")
-            if st.button("Run / Refresh", type="primary", key="run_btn_main"):
-                _trigger_run("main")
-                st.experimental_rerun()
-
-            st.caption("Cache Root")
-            st.code(_get_state_value(state, "cache_root", "CACHE_ROOT"), language=None)
-
-            st.caption("Rules file")
-            st.code(_get_state_value(state, "rules_path", "rules"), language=None)
-
-            st.caption("Analysis")
-            st.code(
-                _get_state_value(state, "analysis_path", "analysis_glob", "input_csv"),
-                language=None,
-            )
-
-    table_host = right_col if mode == "stacked" else left_col
+        table_container = left_col
+        detail_container = right_col
     filtered_reset = filtered.reset_index(drop=True)
 
     def render_table_area() -> None:
@@ -848,10 +830,11 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
         )
 
     if mode == "stacked":
-        with table_host:
+        with table_container:
             with st.container(border=True):
                 render_table_area()
-            st.divider()
+        st.divider()
+        with detail_container:
             with st.container(border=True):
                 render_detail_panel(
                     _get_selected_record(records),
@@ -859,9 +842,9 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
                     layout_mode=mode,
                 )
     else:
-        with table_host:
+        with table_container:
             render_table_area()
-        with right_col:
+        with detail_container:
             render_detail_panel(
                 _get_selected_record(records),
                 rules_path=rules_path,
