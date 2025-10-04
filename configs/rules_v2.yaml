@@ -4,24 +4,34 @@ rule_titles:
   C-RED-001: 非合意の性的描写
   A-RED-001: 未成年×性的（厳重警告）
   A-YEL-001: 要確認：幼い体型＋性的文脈
-  A-RED-EXPL-001: 未成年（直截語）× Explicit
-  A-ORG-QUES-001: 未成年（直截語）× Questionable
-  A-RED-SIT-H-QPLUS-001: 未成年状況（high）× Q以上
-  A-RED-EXPL-SIT-O-001: 未成年状況（other）× Explicit
-  A-ORG-QUES-SIT-O-001: 未成年状況（other）× Questionable
-  A-ORG-EXPL-SUS-001: 未成年疑い（seed×medium±offset）× Explicit
-  A-YEL-QUES-SUS-001: 未成年疑い（seed×medium±offset）× Questionable
-  B-RED-NSFW-EXPL-001: 非NSFWチャンネルの露骨な性表現（Explicitのみ）
-  B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネルの性的（Questionable：露骨露出×大面積×主行為強）
-  C-ORG-QUES-STRICT-001: 非合意（必須:直截語 × (失神/痛み) + offset）× Q以上
-  E-RED-QPLUS-BEST-001: 獣姦（名指し）× Q以上
-  E-ORG-QPLUS-SUS-001: 獣姦疑い（存在＋強い性的根拠）× Q以上
-  E-YEL-QPLUS-PRES-001: 動物存在 × Q以上
-  D-RED-SEX-GORE-STRICT-001: 性的 × 重ゴア（厳格ANDゲート＋オフセット）
-  D-ORG-GORE-STRICT-001: 重ゴア（厳格ANDゲート＋オフセット）
+  A-RED-EXPL-001: 子供 × Explicit
+  A-ORG-QUES-001: 子供 × Questionable
+  A-RED-SIT-H-QPLUS-001: 子供同士 × Questionable以上
+  A-RED-EXPL-SIT-O-001: 年齢差 × Explicit
+  A-ORG-QUES-SIT-O-001: 年齢差 × Questionable
+  A-ORG-EXPL-SUS-001: 子供（低確度）× Explicit
+  A-YEL-QUES-SUS-001: 子供（低確度）× Questionable
+  B-RED-NSFW-EXPL-001: 非NSFWチャンネル× Explicit
+  B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネル× Questionable+
+  C-ORG-QUES-STRICT-001: 非合意 × Questionable以上
+  E-RED-QPLUS-BEST-001: 獣姦 × Questionable以上
+  E-ORG-QPLUS-SUS-001: 獣姦疑い × Questionable以上
+  E-YEL-QPLUS-PRES-001: 動物存在 × Questionable以上
+  D-RED-SEX-GORE-STRICT-001: 性的 × 重ゴア
+  D-ORG-GORE-STRICT-001: 重ゴア単体
 thresholds:
   wd14_questionable: 0.35
   wd14_explicit: 0.2
+  qe:
+    share_min: 0.55
+  coercion:
+    main_strict: 0.5
+    pain_cnt: 1
+    sub_min: 1
+    uncon_min: 0.35
+    force_org: 0.98
+  minor:
+    sit_enabled: 0.0
 groups:
   nsfw_general:
   - nipples
@@ -624,10 +634,18 @@ features:
   is_qplus: (rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)
   qe_margin: max(rating.questionable - const_WD14_QUES, rating.explicit - const_WD14_EXPL)
   is_low_margin: qe_margin < const_LOW_MARGIN
+  rating_total: clamp(rating.general + rating.sensitive + rating.questionable + rating.explicit,
+    0.01, 99.0)
+  explicit_share: rating.explicit / rating_total
+  questionable_share: rating.questionable / rating_total
+  qe_share_max: max(explicit_share, questionable_share)
+  qe_share_low: qe_share_max < const_QE_SHARE_MIN
   bestiality_peak: max('bestiality_direct')
   coercion_main_peak: max('coercion_main')
+  coercion_gate_main: coercion_main_peak >= const_COERCION_MAIN_STRICT
   uncon_peak: max('unconscious_states')
   pain_peak: max('pain_expressions')
+  pain_cnt: count('pain_expressions', gt=0.35)
   sec_peak: max(uncon_peak, pain_peak)
   base_strength: clamp((coercion_main_peak / const_COERCION_PAIR) * (sec_peak / const_COERCION_PAIR),
     0, 1)
@@ -635,6 +653,7 @@ features:
   rest_topk: topk_sum('restraint_gear', k=3, gt=0.50)
   offset_strength: clamp((sub_cnt * 0.12) + ((rest_topk / 1.50) * 0.18), 0, 0.30)
   coercion_final_score: clamp(base_strength + offset_strength, 0, 1)
+  coercion_gate_support: (pain_cnt >= const_COERCION_PAIN_CNT) || (sub_cnt >= const_COERCION_SUB_MIN) || (uncon_peak >= const_COERCION_UNCON_MIN)
   coercion_org_threshold: const_COERCION_ORG + (0.03 * is_low_margin)
   is_e: rating.explicit >= const_WD14_EXPL
   is_q: rating.questionable >= const_WD14_QUES
@@ -655,6 +674,7 @@ features:
   minor_neg_offset: clamp((max('minor_body_special') / 0.35) * 0.30, 0, 0.30)
   minor_suspect_score: clamp(minor_suspect_base + minor_pos_offset - minor_neg_offset,
     0, 1)
+  minor_sit_enabled: const_MINOR_SIT_ENABLED >= 0.5
   gore_main_peak: max('gore_peak')
   injury_topk: topk_sum('injury_tags', k=3, gt=0.35)
   blood_topk: topk_sum('blood_tags', k=3, gt=0.35)
@@ -666,7 +686,6 @@ features:
     0, 1))
   gore_base_score: clamp(t_main * t_dense * t_int, 0, 1) * 0.60
   death_cnt: count('death_markers', gt=0.35)
-  pain_cnt: count('pain_expressions', gt=0.35)
   gore_offset: clamp(death_cnt * 0.20 + pain_cnt * 0.10, 0, 0.40)
   gore_final_score: clamp(gore_base_score + gore_offset, 0, 1)
   gore_org_threshold: const_GORE_ORG + (0.03 * is_low_margin)
@@ -677,12 +696,22 @@ rules:
 - id: C-ORG-QUES-STRICT-001
   severity: orange
   priority: 85
-  when: is_qplus && (coercion_final_score >= coercion_org_threshold)
+  when: is_qplus && !qe_share_low && coercion_gate_main && coercion_gate_support && (coercion_final_score >= coercion_org_threshold) && (minor_main_peak < const_MINOR_MAIN) && (minor_suspect_score < const_SUSPECT_Q)
   reasons:
   - "main={coercion_main_peak:.2f}"
   - "sec={sec_peak:.2f}"
   - "offset=sub:{sub_cnt},rest:{rest_topk:.2f}"
   - "final={coercion_final_score:.2f}"
+  - "share={qe_share_max:.2f}"
+  - "rating=max({rating.questionable:.2f},{rating.explicit:.2f})"
+  stop: true
+- id: C-ORG-QUES-STRICT-002
+  severity: orange
+  priority: 84
+  when: is_qplus && qe_share_low && (coercion_final_score >= const_COERCION_FORCE_ORG) && (minor_main_peak < const_MINOR_MAIN) && (minor_suspect_score < const_SUSPECT_Q)
+  reasons:
+  - "final={coercion_final_score:.2f}"
+  - "share={qe_share_max:.2f}"
   - "rating=max({rating.questionable:.2f},{rating.explicit:.2f})"
   stop: true
 # 旧 C-RED-001 は v2.1 で無効化（合算＋RED判定を撤廃）
@@ -740,7 +769,7 @@ rules:
 - id: A-RED-EXPL-SIT-O-001
   severity: red
   priority: 94
-  when: (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_explicit
+  when: minor_sit_enabled && (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_explicit
   reasons:
   - "minor_sit_other={minor_sit_other_peak:.2f}"
   - "rating=explicit({rating.explicit:.2f})"
@@ -748,7 +777,7 @@ rules:
 - id: A-ORG-QUES-SIT-O-001
   severity: orange
   priority: 93
-  when: (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_questionable
+  when: minor_sit_enabled && (minor_sit_other_peak >= const_MINOR_MAIN) && rating_is_questionable
   reasons:
   - "minor_sit_other={minor_sit_other_peak:.2f}"
   - "rating=questionable({rating.questionable:.2f})"
@@ -756,7 +785,7 @@ rules:
 - id: A-ORG-EXPL-SUS-001
   severity: orange
   priority: 92
-  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_E) && rating_is_explicit
+  when: minor_sit_enabled && (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_E) && rating_is_explicit
   reasons:
   - "minor_suspect={minor_suspect_score:.2f}"
   - "seed={minor_suspect_seed:.2f}"
@@ -765,7 +794,7 @@ rules:
 - id: A-YEL-QUES-SUS-001
   severity: yellow
   priority: 91
-  when: (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_Q) && rating_is_questionable
+  when: minor_sit_enabled && (minor_suspect_seed >= 0.35) && (minor_suspect_score >= const_SUSPECT_Q) && rating_is_questionable
   reasons:
   - "minor_suspect={minor_suspect_score:.2f}"
   - "seed={minor_suspect_seed:.2f}"
@@ -774,14 +803,15 @@ rules:
 - id: B-RED-NSFW-EXPL-001
   severity: red
   priority: 76
-  when: (!channel.is_nsfw) && is_e
+  when: (!channel.is_nsfw) && is_e && !qe_share_low
   reasons:
   - "explicit={rating.explicit:.2f}"
+  - "share={qe_share_max:.2f}"
   stop: true
 - id: B-ORG-NSFW-QUES-STRICT-001
   severity: orange
   priority: 75
-  when: (!channel.is_nsfw) && is_q && exposure_prominent && (sexual_main >= const_SEXUAL_MAIN_STRONG) && is_explicit_exposed && !is_low_margin
+  when: (!channel.is_nsfw) && !qe_share_low && is_q && exposure_prominent && (sexual_main >= const_SEXUAL_MAIN_STRONG) && is_explicit_exposed && !is_low_margin
   reasons:
   - "explicit={rating.explicit:.2f}"
   - "q={rating.questionable:.2f}"
@@ -789,6 +819,7 @@ rules:
   - "sexual_main={sexual_main:.2f}"
   - "explicit_exposed={is_explicit_exposed}"
   - "qe_margin={qe_margin:.3f}"
+  - "share={qe_share_max:.2f}"
   stop: true
 # 旧 B-RED-NSFW-001 / B-ORG-001 は v2.1 で無効化（ExplicitのみをREDとし、Q/Sは基本GREEN）
 # - id: B-RED-NSFW-001
@@ -811,12 +842,13 @@ rules:
 - id: D-RED-SEX-GORE-STRICT-001
   severity: red
   priority: 78
-  when: gore_heavy_gate && (gore_final_score >= gore_red_threshold) && (is_e || sexual_main >= const_SEXUAL_MAIN_STRONG)
+  when: gore_heavy_gate && !qe_share_low && (gore_final_score >= gore_red_threshold) && (is_e || sexual_main >= const_SEXUAL_MAIN_STRONG)
   reasons:
   - "gate(main={gore_main_peak:.2f},dense={gore_density_cnt:.0f},int=max({injury_topk:.2f},{blood_topk:.2f}))"
   - "final={gore_final_score:.2f} (base={gore_base_score:.2f}+offset={gore_offset:.2f})"
   - "sexual_main={sexual_main:.2f}"
   - "explicit={rating.explicit:.2f}"
+  - "share={qe_share_max:.2f}"
   stop: true
 - id: D-ORG-GORE-STRICT-001
   severity: orange
@@ -845,21 +877,23 @@ rules:
 - id: E-RED-QPLUS-BEST-001
   severity: red
   priority: 79
-  when: is_qplus && (bestiality_peak >= const_BESTIALITY)
+  when: is_qplus && !qe_share_low && (bestiality_peak >= const_BESTIALITY)
   reasons:
   - "bestiality={bestiality_peak:.2f}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
+  - "share={qe_share_max:.2f}"
   stop: true
 - id: E-ORG-QPLUS-SUS-001
   severity: orange
   priority: 78
-  when: is_qplus && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
+  when: is_qplus && !qe_share_low && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
   reasons:
   - "bestiality={bestiality_peak:.2f}"
   - "presence={animal_presence:.2f}"
   - "sexual_main={sexual_main:.2f}"
   - "explicit_exposed={is_explicit_exposed}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
+  - "share={qe_share_max:.2f}"
   stop: true
 - id: E-YEL-QPLUS-PRES-001
   severity: yellow

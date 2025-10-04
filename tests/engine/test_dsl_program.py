@@ -216,3 +216,104 @@ def test_qe_margin_boundary_behaviour() -> None:
         )
     )
     assert high_outcome is None
+
+
+def _build_coercion_share_program() -> DslProgram:
+    const_map = build_const_map()
+    features = {
+        "is_qplus": "(rating.explicit >= const_WD14_EXPL) || (rating.questionable >= const_WD14_QUES)",
+        "rating_total": "clamp(rating.general + rating.sensitive + rating.questionable + rating.explicit, 0.01, 99.0)",
+        "explicit_share": "rating.explicit / rating_total",
+        "questionable_share": "rating.questionable / rating_total",
+        "qe_share_max": "max(explicit_share, questionable_share)",
+        "qe_share_low": "qe_share_max < const_QE_SHARE_MIN",
+    }
+    rules = [
+        DslRule(
+            id="STRICT",
+            severity="orange",
+            priority=10,
+            when="is_qplus && !qe_share_low && (coercion_final >= const_COERCION_ORG) && (minor_main < const_MINOR_MAIN) && (minor_suspect < const_SUSPECT_Q)",
+            reasons=["final={coercion_final:.2f}", "share={qe_share_max:.2f}"],
+        ),
+        DslRule(
+            id="RESCUE",
+            severity="orange",
+            priority=5,
+            when="is_qplus && qe_share_low && (coercion_final >= const_COERCION_FORCE_ORG) && (minor_main < const_MINOR_MAIN) && (minor_suspect < const_SUSPECT_Q)",
+            reasons=["final={coercion_final:.2f}", "share={qe_share_max:.2f}"],
+        ),
+    ]
+    config = RuleConfigV2(features=features, rules=rules)
+    return DslProgram.from_config(config, DslPolicy.from_mode("warn"), const_map=const_map)
+
+
+def test_qe_share_low_blocks_strict_rule() -> None:
+    program = _build_coercion_share_program()
+    const_map = build_const_map()
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={
+                "explicit": const_map["const_WD14_EXPL"] + 0.15,
+                "questionable": const_map["const_WD14_QUES"] - 0.10,
+                "general": 0.20,
+                "sensitive": 0.10,
+            },
+            metrics={"coercion_final": const_map["const_COERCION_ORG"] + 0.02, "minor_main": 0.10, "minor_suspect": 0.10},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is None
+
+
+def test_qe_share_low_allows_rule_when_share_high_enough() -> None:
+    program = _build_coercion_share_program()
+    const_map = build_const_map()
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={
+                "explicit": const_map["const_WD14_EXPL"] + 0.15,
+                "questionable": const_map["const_WD14_QUES"] - 0.15,
+                "general": 0.02,
+                "sensitive": 0.02,
+            },
+            metrics={"coercion_final": const_map["const_COERCION_ORG"] + 0.02, "minor_main": 0.10, "minor_suspect": 0.10},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is not None
+    assert outcome.rule_id == "STRICT"
+
+
+def test_coercion_force_rescues_low_share_cases() -> None:
+    program = _build_coercion_share_program()
+    const_map = build_const_map()
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={
+                "explicit": const_map["const_WD14_EXPL"] + 0.15,
+                "questionable": const_map["const_WD14_QUES"] - 0.10,
+                "general": 0.20,
+                "sensitive": 0.10,
+            },
+            metrics={"coercion_final": const_map["const_COERCION_FORCE_ORG"] + 0.01, "minor_main": 0.10, "minor_suspect": 0.10},
+            tag_scores={},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is not None
+    assert outcome.rule_id == "RESCUE"

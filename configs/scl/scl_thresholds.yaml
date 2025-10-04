@@ -5,6 +5,8 @@ const:
   wd14:
     questionable: 0.50
     explicit: 0.50
+  qe:
+    share_min: 0.55
   exposure:
     area:
       mid: 0.15
@@ -15,12 +17,18 @@ const:
   low_margin: 0.10
   minor:
     main: 0.30
+    sit_enabled: 0.0
   suspect:
     explicit: 0.60
     questionable: 0.45
   coercion:
     pair: 0.55
     org: 0.95
+    main_strict: 0.50
+    pain_cnt: 1
+    sub_min: 1
+    uncon_min: 0.35
+    force_org: 0.98
   bestiality:
     direct: 0.20
   animal:
@@ -42,6 +50,7 @@ minor:
     red: 0.80
   special_score:
     yellow: 0.35
+  sit_enabled: 0.0
 sexual:
   main:
     strong: 0.60
@@ -72,6 +81,11 @@ suspect:
 coercion:
   pair: 0.55
   org: 0.95
+  main_strict: 0.50
+  pain_cnt: 1
+  sub_min: 1
+  uncon_min: 0.35
+  force_org: 0.98
 gore:
   main_gate: 0.30
   density_gate: 4.0
