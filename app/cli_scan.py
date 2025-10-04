@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .engine.loader import load_const_overrides_from_path
+from .output_paths import default_analysis_path, default_findings_path
 from .mode_resolver import has_version_mismatch, resolve_policy
 from .rule_engine import RuleEngine
 from .triage import run_scan
@@ -12,8 +13,8 @@ from .triage import run_scan
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run rule evaluation on analysis output")
-    parser.add_argument("--analysis", type=Path, default=Path("out/p2_analysis.jsonl"))
-    parser.add_argument("--findings", type=Path, default=Path("out/p3_findings.jsonl"))
+    parser.add_argument("--analysis", type=Path, default=default_analysis_path())
+    parser.add_argument("--findings", type=Path, default=default_findings_path())
     parser.add_argument("--rules", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--channel", action="append", help="Channel ID to include (repeatable)")
     parser.add_argument(

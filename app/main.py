@@ -17,6 +17,14 @@ from .discord_client import create_client
 from .engine.group_utils import group_top_tags
 from .engine.tag_norm import normalize_pair, normalize_tag
 from .mode_resolver import has_version_mismatch, resolve_policy
+from .output_paths import (
+    default_analysis_path,
+    default_findings_path,
+    default_report_path,
+    ensure_parent,
+    resolve_analysis_path,
+    resolve_findings_path,
+)
 from .rule_engine import RuleEngine
 from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
 from .store import Ticket, TicketStore
@@ -480,8 +488,8 @@ def _record_matches_message(record: dict, channel_id: int, message_id: int) -> b
 
 
 def find_record_for_message(channel_id: int, message_id: int) -> Optional[dict]:
-    path = Path("out/p3_findings.jsonl")
-    if not path.exists():
+    path = resolve_findings_path()
+    if path is None or not path.exists():
         return None
     time_range = (UTC_MIN, UTC_MAX)
     for record in iter_findings(path, time_range=time_range):
@@ -491,8 +499,8 @@ def find_record_for_message(channel_id: int, message_id: int) -> Optional[dict]:
 
 
 def load_findings_index() -> dict[tuple[int, int], dict]:
-    path = Path("out/p3_findings.jsonl")
-    if not path.exists():
+    path = resolve_findings_path()
+    if path is None or not path.exists():
         return {}
 
     def _key(cid: Any, mid: Any) -> Optional[tuple[int, int]]:
@@ -1960,11 +1968,14 @@ def register_commands(
             )
             return
 
+        analysis_input = resolve_analysis_path() or default_analysis_path()
+        findings_output = ensure_parent(default_findings_path())
+
         try:
             summary = await asyncio.to_thread(
                 run_scan,
-                Path("out/p2_analysis.jsonl"),
-                Path("out/p3_findings.jsonl"),
+                analysis_input,
+                findings_output,
                 Path("configs/rules_v2.yaml"),
                 channel_ids=channel_ids,
                 since=since,
@@ -2050,9 +2061,14 @@ def register_commands(
         default_end_offset = timedelta()
         resolved_range = resolve_time_range(since, until, default_end_offset=default_end_offset)
 
+        findings_path = resolve_findings_path()
+        if findings_path is None or not findings_path.exists():
+            await interaction.followup.send("検知データが見つかりません。先に /scan を実行してください。", ephemeral=True)
+            return
+
         try:
             records = await load_findings_async(
-                Path("out/p3_findings.jsonl"),
+                findings_path,
                 channel_ids=channel_ids,
                 since=since,
                 until=until,
@@ -2078,7 +2094,7 @@ def register_commands(
         if send_csv:
             engine = RuleEngine()
             violence_patterns = engine.groups.get("violence", ())
-            csv_path = Path("out/p3_report.csv")
+            csv_path = ensure_parent(default_report_path())
             rows = write_report_csv(records, csv_path, violence_patterns)
             with csv_path.open("rb") as fp:
                 severity_display = _severity_option_label(severity_value)

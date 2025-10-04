@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from jsonschema import Draft7Validator
 
+from .output_paths import default_findings_path, default_report_path
 from .triage import P3_CSV_HEADER
 
 
@@ -17,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
 
     findings = sub.add_parser("check-findings", help="Validate findings JSONL against schema")
-    findings.add_argument("--path", type=Path, default=Path("out/p3_findings.jsonl"))
+    findings.add_argument("--path", type=Path, default=default_findings_path())
     findings.add_argument(
         "--schema",
         type=Path,
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     findings.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
 
     report = sub.add_parser("check-report", help="Validate report CSV header ordering")
-    report.add_argument("--path", type=Path, default=Path("out/p3_report.csv"))
+    report.add_argument("--path", type=Path, default=default_report_path())
     report.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
 
     return parser.parse_args()

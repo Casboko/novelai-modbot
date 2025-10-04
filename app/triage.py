@@ -16,14 +16,15 @@ from .engine.group_utils import group_top_tags
 from .engine.tag_norm import normalize_pair
 from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
+from .output_paths import default_analysis_path, default_findings_path, default_report_path
 from .p3_stream import FindingsWriter, evaluate_stream, _build_contract_payload
 from .rule_engine import EvaluationResult, RuleEngine
 from .triage_attachments import P0Index
 
 
-FINDINGS_PATH = Path("out/p3_findings.jsonl")
-REPORT_PATH = Path("out/p3_report.csv")
-ANALYSIS_PATH = Path("out/p2_analysis.jsonl")
+FINDINGS_PATH = default_findings_path()
+REPORT_PATH = default_report_path()
+ANALYSIS_PATH = default_analysis_path()
 
 # CSV 列順の契約。順序変更は CLI/テストで検知する。
 P3_CSV_HEADER: tuple[str, ...] = (

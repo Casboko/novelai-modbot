@@ -23,6 +23,7 @@ from .batch_loader import ImageRequest, load_images
 from .cache_nudenet import CacheKey as NudeCacheKey, NudeNetCache
 from .calibration import apply_wd14_calibration, load_calibration
 from .schema import MessageRef, NudityDetection, parse_bool
+from .output_paths import default_analysis_path
 from .local_cache import resolve_local_file
 
 
@@ -129,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge WD14 and NudeNet analysis")
     parser.add_argument("--scan", type=Path, default=Path("out/p0_scan.csv"))
     parser.add_argument("--wd14", type=Path, default=Path("out/p1_wd14.jsonl"))
-    parser.add_argument("--out", type=Path, default=Path("out/p2_analysis.jsonl"))
+    parser.add_argument("--out", type=Path, default=default_analysis_path())
     parser.add_argument("--metrics", type=Path, default=Path("out/p2_metrics.json"))
     parser.add_argument("--nudenet-cache", type=Path, default=Path("app/cache_nudenet.sqlite"))
     parser.add_argument("--nudenet-config", type=Path, default=Path("configs/nudenet.yaml"))

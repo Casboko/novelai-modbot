@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .output_paths import default_findings_path, default_report_path
 from .triage import generate_report
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate moderation report CSV")
-    parser.add_argument("--findings", type=Path, default=Path("out/p3_findings.jsonl"))
-    parser.add_argument("--out", type=Path, default=Path("out/p3_report.csv"))
+    parser.add_argument("--findings", type=Path, default=default_findings_path())
+    parser.add_argument("--out", type=Path, default=default_report_path())
     parser.add_argument("--severity", type=str, default="all", help="Severity filter: all/red/orange/yellow/green")
     parser.add_argument("--rules", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--channel", action="append", help="Channel ID to include (repeatable)")
