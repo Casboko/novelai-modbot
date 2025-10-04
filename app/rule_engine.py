@@ -23,6 +23,8 @@ class EvaluationResult:
 
 
 class RuleEngine:
+    DEFAULT_RULES_PATH = DEFAULT_RULES_PATH
+
     def __init__(
         self,
         config_path: str | Path | None = None,
@@ -31,7 +33,8 @@ class RuleEngine:
         nudenet_config_path: str | None = None,  # legacy互換のため受け取るが未使用
         const_overrides: Mapping[str, float] | None = None,
     ) -> None:
-        rules_path = Path(config_path or DEFAULT_RULES_PATH)
+        default_path = config_path or self.DEFAULT_RULES_PATH
+        rules_path = Path(default_path)
         _ = nudenet_config_path  # kept for compatibility
         requested_policy = policy or DslPolicy()
         dsl_config, raw_config, resolved_policy = load_rule_config(rules_path, requested_policy)
