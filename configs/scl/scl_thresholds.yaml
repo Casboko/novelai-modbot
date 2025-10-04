@@ -33,6 +33,7 @@ const:
     direct: 0.20
   animal:
     presence: 0.50
+    fp_penalty: 0.80
   gore:
     main: 0.40
     density: 4.0
@@ -103,6 +104,7 @@ animal:
   presence_gate: 0.35
   presence:
     yellow: 0.30
+  fp_penalty: 0.80
 bestiality:
   direct_gate: 0.20
   direct:

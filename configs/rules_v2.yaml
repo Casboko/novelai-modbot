@@ -32,6 +32,8 @@ thresholds:
     force_org: 0.98
   minor:
     sit_enabled: 0.0
+  animal:
+    fp_penalty: 0.8
 groups:
   nsfw_general:
   - nipples
@@ -612,6 +614,12 @@ groups:
   - orca
   - bat_(animal)
   - seal_(animal)
+  animal_fp_subjects:
+  - bug
+  - fish
+  - tentacles
+  - monster
+  - creature
   bestiality_direct:
   - bestiality
   - animal_penis
@@ -692,6 +700,11 @@ features:
   gore_red_threshold: const_GORE_RED + (0.03 * is_low_margin)
   animal_presence: max('animal_subjects')
   animal_score: sum('animal_subjects')
+  animal_fp_peak: max('animal_fp_subjects')
+  animal_fp_sum: topk_sum('animal_fp_subjects', k=3, gt=0.35)
+  animal_fp_offset: clamp(max(animal_fp_peak, animal_fp_sum / 1.5), 0, 1)
+  bestiality_effective: clamp(bestiality_peak - (animal_fp_offset * const_ANIMAL_FP_PENALTY), 0, 1)
+  animal_presence_effective: clamp(animal_presence - (animal_fp_offset * const_ANIMAL_FP_PENALTY), 0, 1)
 rules:
 - id: C-ORG-QUES-STRICT-001
   severity: orange
@@ -877,19 +890,22 @@ rules:
 - id: E-RED-QPLUS-BEST-001
   severity: red
   priority: 79
-  when: is_qplus && !qe_share_low && (bestiality_peak >= const_BESTIALITY)
+  when: is_qplus && !qe_share_low && (bestiality_effective >= const_BESTIALITY)
   reasons:
-  - "bestiality={bestiality_peak:.2f}"
+  - "bestiality_eff={bestiality_effective:.2f}"
+  - "bestiality_raw={bestiality_peak:.2f}"
+  - "fp_offset={animal_fp_offset:.2f}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   - "share={qe_share_max:.2f}"
   stop: true
 - id: E-ORG-QPLUS-SUS-001
   severity: orange
   priority: 78
-  when: is_qplus && !qe_share_low && (animal_presence >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
+  when: is_qplus && !qe_share_low && (animal_presence_effective >= const_ANIMAL_PRES) && ((sexual_main >= const_SEXUAL_MAIN_STRONG) || is_explicit_exposed) && !is_low_margin
   reasons:
-  - "bestiality={bestiality_peak:.2f}"
-  - "presence={animal_presence:.2f}"
+  - "bestiality_eff={bestiality_effective:.2f}"
+  - "presence_eff={animal_presence_effective:.2f}"
+  - "fp_offset={animal_fp_offset:.2f}"
   - "sexual_main={sexual_main:.2f}"
   - "explicit_exposed={is_explicit_exposed}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
@@ -898,9 +914,10 @@ rules:
 - id: E-YEL-QPLUS-PRES-001
   severity: yellow
   priority: 77
-  when: is_qplus && (animal_presence >= const_ANIMAL_PRES)
+  when: is_qplus && (animal_presence_effective >= const_ANIMAL_PRES)
   reasons:
-  - "presence={animal_presence:.2f}"
+  - "presence_eff={animal_presence_effective:.2f}"
+  - "fp_offset={animal_fp_offset:.2f}"
   - "rating=q_plus(exp={rating.explicit:.2f},q={rating.questionable:.2f})"
   stop: true
 # 旧 E-RED-001 / E-YEL-001 は v2.1 で無効化（名指しRED / 存在YEL / 疑いORGへ置換）

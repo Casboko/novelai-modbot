@@ -317,3 +317,79 @@ def test_coercion_force_rescues_low_share_cases() -> None:
     )
     assert outcome is not None
     assert outcome.rule_id == "RESCUE"
+
+
+def _build_animal_penalty_program() -> DslProgram:
+    const_map = build_const_map()
+    features = {
+        "animal_presence": "max('animal_subjects')",
+        "animal_fp_peak": "max('animal_fp_subjects')",
+        "animal_fp_sum": "topk_sum('animal_fp_subjects', k=3, gt=0.35)",
+        "animal_fp_offset": "clamp(max(animal_fp_peak, animal_fp_sum / 1.5), 0, 1)",
+        "bestiality_peak": "max('bestiality_direct')",
+        "bestiality_effective": "clamp(bestiality_peak - (animal_fp_offset * const_ANIMAL_FP_PENALTY), 0, 1)",
+        "animal_presence_effective": "clamp(animal_presence - (animal_fp_offset * const_ANIMAL_FP_PENALTY), 0, 1)",
+    }
+    rules = [
+        DslRule(
+            id="BESTIALITY",
+            severity="red",
+            priority=10,
+            when="bestiality_effective >= const_BESTIALITY",
+            reasons=["eff={bestiality_effective:.2f}", "raw={bestiality_peak:.2f}", "offset={animal_fp_offset:.2f}"],
+        ),
+        DslRule(
+            id="ANIMAL",
+            severity="yellow",
+            priority=5,
+            when="animal_presence_effective >= const_ANIMAL_PRES",
+            reasons=["eff={animal_presence_effective:.2f}"],
+        ),
+    ]
+    config = RuleConfigV2(
+        groups={
+            "animal_subjects": ["animal"],
+            "animal_fp_subjects": ["bug"],
+            "bestiality_direct": ["animal_penis"],
+        },
+        features=features,
+        rules=rules,
+    )
+    return DslProgram.from_config(config, DslPolicy.from_mode("warn"), const_map=const_map)
+
+
+def test_animal_penalty_blocks_when_insect_present() -> None:
+    program = _build_animal_penalty_program()
+    const_map = build_const_map()
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={"explicit": const_map["const_WD14_EXPL"] + 0.1, "general": 0.2},
+            metrics={},
+            tag_scores={"animal": 0.6, "bug": 0.9, "animal_penis": 0.4},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is None
+
+
+def test_animal_penalty_keeps_true_positive() -> None:
+    program = _build_animal_penalty_program()
+    const_map = build_const_map()
+    outcome = program.evaluate(
+        DslEvaluationInput(
+            rating={"explicit": const_map["const_WD14_EXPL"] + 0.1, "general": 0.2},
+            metrics={},
+            tag_scores={"animal": 0.6, "bug": 0.05, "animal_penis": 0.4},
+            group_patterns=program.group_patterns,
+            nude_flags=(),
+            is_nsfw_channel=False,
+            is_spoiler=False,
+            attachment_count=0,
+        )
+    )
+    assert outcome is not None
+    assert outcome.rule_id == "BESTIALITY"
