@@ -111,6 +111,27 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 
+def _cache_key_for_path(path: Path) -> tuple[str, float]:
+    try:
+        return str(path), path.stat().st_mtime
+    except FileNotFoundError:
+        return str(path), 0.0
+
+
+@st.cache_data(show_spinner=False)
+def _load_findings_cached(
+    findings_path: str,
+    findings_mtime: float,
+    rules_path: str | None,
+    rules_mtime: float,
+) -> tuple[list[dict], pd.DataFrame]:
+    path = Path(findings_path)
+    records = utils.read_jsonl(path)
+    rules = Path(rules_path) if rules_path else None
+    df = _build_findings_dataframe(records, rules_path=rules)
+    return records, df
+
+
 def _fmt_time_iso_to_min(iso_like: object) -> str | None:
     if not iso_like:
         return None
@@ -629,6 +650,7 @@ def handle_run(placeholder, state: SidebarState) -> None:
         st.success("cli_scan 完了")
         st.code(result.stdout)
         st.session_state["rules_effective_path"] = str(compiled.rules_path)
+        st.cache_data.clear()
         load_findings_into_state()
 
 
@@ -718,15 +740,22 @@ def prepare_rules(rules_path: Path, thresholds_path: Path | None) -> utils.Thres
 
 
 def load_findings_into_state() -> None:
+    rules_source = st.session_state.get("rules_effective_path")
+    effective_rules_path = Path(rules_source) if rules_source else DEFAULT_RULES
+    findings_key = _cache_key_for_path(FINDINGS_PATH)
+    rules_key = _cache_key_for_path(effective_rules_path)
     try:
-        records = utils.read_jsonl(FINDINGS_PATH)
+        records, df = _load_findings_cached(
+            findings_key[0],
+            findings_key[1],
+            str(effective_rules_path) if effective_rules_path else None,
+            rules_key[1],
+        )
     except utils.UtilsError as exc:
         st.error(str(exc))
         return
     st.session_state["findings_records"] = records
-    rules_source = st.session_state.get("rules_effective_path")
-    rules_path = Path(rules_source) if rules_source else DEFAULT_RULES
-    st.session_state["findings_df"] = build_findings_dataframe(records, rules_path=rules_path)
+    st.session_state["findings_df"] = df
 
 
 def load_ab_outputs() -> None:
@@ -753,7 +782,7 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
 
     df = st.session_state.get("findings_df")
     if df is None:
-        df = build_findings_dataframe(records, rules_path=rules_path)
+        df = _build_findings_dataframe(records, rules_path=rules_path)
     df = df.copy()
 
     filtered = df
@@ -913,7 +942,7 @@ def ensure_directories() -> None:
     _ensure_placeholder_thumb()
 
 
-def build_findings_dataframe(records: list[dict], *, rules_path: Path | None = None) -> pd.DataFrame:
+def _build_findings_dataframe(records: list[dict], *, rules_path: Path | None = None) -> pd.DataFrame:
     feature_ids = _discover_feature_ids(rules_path) if rules_path else []
     default_features = [
         "nsfw_rating_max",
