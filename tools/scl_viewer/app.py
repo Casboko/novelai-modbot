@@ -49,10 +49,66 @@ SEVERITY_BADGES = {
 
 LAYOUT_MODES = ("classic", "stacked")
 DEFAULT_LAYOUT_MODE = "stacked"
-DEFAULT_LIST_HEIGHT_PX = 420
-LIST_HEIGHT_MIN_PX = 260
-LIST_HEIGHT_MAX_PX = 900
-LIST_HEIGHT_STEP_PX = 20
+DEFAULT_LIST_HEIGHT_PX = 120
+CHART_TOPK_MAX = 10
+
+CATEGORY_GROUPS_DEFAULT: dict[str, set[str]] = {
+    "minor": {
+        "minor_peak",
+        "minor_body_high",
+        "minor_body_medium",
+        "minor_body_low",
+        "minor_face_like",
+        "minor_context",
+        "minor_uniforms",
+        "minor_school_context",
+        "minor_tags",
+        "underage_context",
+        "youth_context",
+    },
+    "animal": {
+        "animal_subjects",
+        "animal_context",
+        "bestiality_direct",
+        "bestiality_context",
+        "beastlike_traits",
+        "feral_subjects",
+    },
+    "nonconsent": {
+        "coercion_main",
+        "coercion_context",
+        "rape_tags",
+        "abuse_tags",
+        "unconscious_states",
+        "restraint_gear",
+        "bondage_context",
+        "pain_expressions",
+    },
+    "gore": {
+        "gore_peak",
+        "gore_context",
+        "blood_tags",
+        "injury_tags",
+        "wound_exposed",
+        "mutilation_tags",
+        "death_markers",
+        "shock_tags",
+    },
+}
+
+CATEGORY_PREFIXES: dict[str, tuple[str, ...]] = {
+    "minor": ("minor_", "underage_", "youth_"),
+    "animal": ("animal_", "bestiality_", "beast_", "feral_"),
+    "nonconsent": ("coercion_", "rape_", "abuse_", "nonconsent_", "restraint_", "pain_", "kidnap_"),
+    "gore": ("gore_", "injury_", "blood_", "wound_", "mutilation_", "death_", "shock_"),
+}
+
+CATEGORY_LABELS: dict[str, str] = {
+    "minor": "マイナー系",
+    "animal": "アニマル系",
+    "nonconsent": "非合意系",
+    "gore": "ゴア・ショッキング系",
+}
 
 
 def _fmt_time_iso_to_min(iso_like: object) -> str | None:
@@ -94,6 +150,102 @@ def _dedup_preserve_order(items: Iterable[str]) -> list[str]:
         seen.add(item)
         result.append(item)
     return result
+
+
+def resolve_category_groups(available_groups: set[str]) -> dict[str, set[str]]:
+    resolved: dict[str, set[str]] = {}
+    for category, candidates in CATEGORY_GROUPS_DEFAULT.items():
+        resolved[category] = {candidate for candidate in candidates if candidate in available_groups}
+    return resolved
+
+
+def _match_category_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name.startswith(prefix) for prefix in prefixes)
+
+
+def _category_feature_entries(
+    feature_values: Mapping[str, Any],
+    prefixes: tuple[str, ...],
+    limit: int = 6,
+) -> list[tuple[str, float]]:
+    items: list[tuple[str, float]] = []
+    for key, value in feature_values.items():
+        numeric = _safe_float(value)
+        if numeric is None or numeric <= 0:
+            continue
+        if _match_category_prefix(key, prefixes):
+            items.append((key, numeric))
+    items.sort(key=lambda item: item[1], reverse=True)
+    return items[:limit]
+
+
+def _category_topk_dataframe(
+    group_hits: Mapping[str, list[tuple[str, float]]],
+    explicit_groups: set[str],
+    prefixes: tuple[str, ...],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for group_name, hits in (group_hits or {}).items():
+        if group_name in explicit_groups or _match_category_prefix(group_name, prefixes):
+            for tag, score in hits:
+                numeric = _safe_float(score)
+                if numeric is None:
+                    continue
+                rows.append({"group": group_name, "tag": str(tag), "score": numeric})
+    if not rows:
+        return pd.DataFrame(columns=["tag", "score"])
+    df = pd.DataFrame(rows)
+    df = df.sort_values("score", ascending=False).head(CHART_TOPK_MAX)
+    return df[["tag", "score"]]
+
+
+def _render_topk_chart(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.caption("関連タグのヒットはありません。")
+        return
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("score:Q", title="score"),
+            y=alt.Y("tag:N", sort="-x", title="tag"),
+            tooltip=[alt.Tooltip("tag:N"), alt.Tooltip("score:Q", format=".3f")],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def summarize_reasons(record: Mapping[str, Any]) -> tuple[str, list[str]]:
+    raw_reasons = record.get("reasons") or []
+    processed: list[str] = []
+    seen: set[str] = set()
+    for reason in raw_reasons:
+        text = _format_reason_text(str(reason))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        processed.append(text)
+        if len(processed) >= 5:
+            break
+    if not processed:
+        return "—", []
+    return processed[0], processed
+
+
+def _format_reason_text(text: str) -> str:
+    cleaned = text.strip().lstrip("-•")
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("_", " ")
+
+    def _repl(match: re.Match[str]) -> str:
+        value = _safe_float(match.group(0))
+        if value is None:
+            return match.group(0)
+        return f"{value:.3f}"
+
+    formatted = REASON_NUMBER_PATTERN.sub(_repl, cleaned)
+    return formatted
 
 
 def _ensure_placeholder_thumb() -> Path:
@@ -662,82 +814,18 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
         loc_table = _where_list(mode)
         loc_detail = _where_detail(mode)
 
-        header_col, height_col = st.columns([4, 1], gap="small")
-        with header_col:
-            st.subheader("Findings")
-        with height_col:
-            st.number_input(
-                "height(px)",
-                LIST_HEIGHT_MIN_PX,
-                LIST_HEIGHT_MAX_PX,
-                st.session_state.get("list_height_px", DEFAULT_LIST_HEIGHT_PX),
-                LIST_HEIGHT_STEP_PX,
-                key="list_height_px",
-            )
-
-        with st.popover("🔎 クイックプレビュー", use_container_width=True):
-            preview_record = _get_selected_record(records)
-            if preview_record:
-                preview_thumb = get_thumbnail_for_record(preview_record)
-                st.image(str(preview_thumb), width=512)
-            else:
-                st.caption(f"{loc_table}の一覧で行を選択してください。")
-
-        thumb_size_options = ["S", "M", "L"]
-        default_thumb_size = st.session_state.get("scl_thumb_size", "M")
-        try:
-            default_thumb_index = thumb_size_options.index(default_thumb_size)
-        except ValueError:
-            default_thumb_index = 1
-        selected_thumb_size = st.radio(
-            "サムネサイズ",
-            thumb_size_options,
-            index=default_thumb_index,
-            horizontal=True,
-            key="scl_thumb_size",
-        )
-        thumb_width_map = {"S": 96, "M": 128, "L": 160}
-        thumb_px = thumb_width_map.get(selected_thumb_size, 128)
-        row_height = max(thumb_px, 96)
-
-        preset = st.radio(
-            "列プリセット",
-            list(COLUMN_PRESETS.keys()),
-            horizontal=True,
-            key="scl_column_preset",
-        )
+        st.subheader("Findings")
+        st.session_state["list_height_px"] = DEFAULT_LIST_HEIGHT_PX
 
         available_columns = list(filtered.columns)
-        default_columns = _default_visible_columns(available_columns, preset)
-
-        previous_preset = st.session_state.get("_scl_prev_preset")
-        if previous_preset != preset or "scl_visible_columns" not in st.session_state:
-            st.session_state["_scl_prev_preset"] = preset
-            st.session_state["scl_visible_columns"] = default_columns or available_columns
-
-        visible_columns = st.multiselect(
-            "表示列",
-            options=available_columns,
-            default=st.session_state.get("scl_visible_columns", default_columns),
-            key="scl_visible_columns",
-        )
-        visible_columns = _dedup_preserve_order(
-            col for col in visible_columns if col in filtered.columns
-        )
-        if not visible_columns:
-            fallback_columns = default_columns or available_columns
-            visible_columns = _dedup_preserve_order(
-                col for col in fallback_columns if col in filtered.columns
-            )
-
-        df_display = filtered_reset[visible_columns].copy()
+        df_display = filtered_reset[available_columns].copy()
 
         table_column_config: dict[str, Any] = {}
         if "thumbnail" in df_display.columns:
             table_column_config["thumbnail"] = st.column_config.ImageColumn(
                 "thumb",
                 help="p0 添付から生成したサムネイル",
-                width=thumb_px,
+                width=48,
             )
         if "message_link" in df_display.columns:
             table_column_config["message_link"] = st.column_config.LinkColumn("link")
@@ -750,7 +838,7 @@ def render_findings(records: list[dict], state: SidebarState, layout_mode: str) 
             on_select="rerun",
             selection_mode="single-row",
             height=st.session_state["list_height_px"],
-            row_height=row_height,
+            row_height=32,
         )
 
         _update_selection_from_event(event, filtered_reset)
@@ -963,155 +1051,142 @@ def render_detail_panel(
         return
 
     metrics = record.get("metrics", {}) or {}
-    severity = (record.get("severity") or "-").upper()
-    rule_id = record.get("rule_id") or "-"
-    rule_title = record.get("rule_title") or "-"
-    header_parts = ["🚩", severity]
-    if rule_id != "-":
-        header_parts.append(f"· {rule_id}")
-    if rule_title and rule_title != "-":
-        header_parts.append(f"— {rule_title}")
-    st.markdown(" ".join(header_parts))
-
     ratings = _extract_wd14_rating(record)
-    nude = _extract_nudenet_metrics(record)
     dsl_block = (metrics.get("dsl") or {}) if isinstance(metrics.get("dsl"), Mapping) else {}
-    dsl_features = (dsl_block.get("features") or {}) if isinstance(dsl_block, Mapping) else {}
-    feature_values = (dsl_features if isinstance(dsl_features, dict) else {}) or {}
-    rules_data = _load_rules_for_detail(rules_path)
+    feature_values = (
+        (dsl_block.get("features") or {}) if isinstance(dsl_block, Mapping) else {}
+    ) or {}
 
-    winning_rule_id = (metrics.get("winning", {}) or {}).get("rule_id")
-    when_clause: str | None = None
-    when_summary_rows: list[dict[str, Any]] = []
-    if winning_rule_id:
-        rule_entry = (rules_data.get("rules") or {}).get(winning_rule_id)
-        when_candidate = rule_entry.get("when") if rule_entry else None
-        if when_candidate:
-            when_clause = when_candidate
-            when_summary_rows = _build_when_summary(
-                when_clause,
-                record,
-                feature_values,
-                rules_data.get("features") or {},
-            )
+    severity_key = str(record.get("severity") or "").lower()
+    sev_badge = SEVERITY_BADGES.get(severity_key, "⬜ -")
+    rule_title = record.get("rule_title") or "-"
+    rule_id = record.get("rule_id") or "-"
+    summary_text, reason_lines = summarize_reasons(record)
 
-    pass_count = sum(1 for row in when_summary_rows if row.get("result") is True)
-    fail_count = sum(1 for row in when_summary_rows if row.get("result") is False)
-    none_count = sum(1 for row in when_summary_rows if row.get("result") is None)
+    is_nsfw_flag = record.get("is_nsfw_channel")
+    if is_nsfw_flag is None:
+        channel_info = record.get("channel") or {}
+        is_nsfw_flag = channel_info.get("is_nsfw")
 
-    exposure_value = _safe_float(metrics.get("exposure_area"))
-    exposure_display = "-" if exposure_value is None else f"{exposure_value:.3f}"
-    explicit_value = _safe_float(ratings.get("e"))
-    explicit_display = "-" if explicit_value is None else f"{explicit_value:.3f}"
-
-    kpi_cols = st.columns(3)
-    kpi_cols[0].metric("exposure_area", exposure_display)
-    kpi_cols[1].metric("wd14: explicit (e)", explicit_display)
-    kpi_cols[2].metric("when summary", f"✅{pass_count} / ❌{fail_count} / −{none_count}")
-
-    reasons = record.get("reasons") or []
-    if reasons:
-        st.write("Reasons: " + "; ".join(reasons))
-
-    message_link = record.get("message_link")
-    if message_link:
-        st.markdown(f"[Message Link]({message_link})")
-
-    thumb_path = get_thumbnail_for_record(record)
-    if thumb_path.exists():
-        st.image(str(thumb_path), width="stretch")
-
-    rating_cols = st.columns(4)
-    rating_labels = {"g": "wd14:g", "s": "wd14:s", "q": "wd14:q", "e": "wd14:e"}
-    for col, key in zip(rating_cols, ("g", "s", "q", "e")):
-        value = ratings.get(key)
-        if value is None:
-            col.metric(rating_labels[key], "-")
+    if isinstance(is_nsfw_flag, bool):
+        nsfw_value: bool | None = is_nsfw_flag
+    elif isinstance(is_nsfw_flag, str):
+        lowered = is_nsfw_flag.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            nsfw_value = True
+        elif lowered in {"false", "0", "no", "n"}:
+            nsfw_value = False
         else:
-            col.metric(rating_labels[key], f"{value:.2f}")
-
-    qe_margin_value = metrics.get("qe_margin")
-    if qe_margin_value is None and isinstance(dsl_features, Mapping):
-        qe_margin_value = dsl_features.get("qe_margin")
-    st.metric("qe_margin", "-" if qe_margin_value is None else f"{qe_margin_value:.3f}")
-
-    nude_cols = st.columns(3)
-    nude_cols[0].metric("exposure_area", f"{nude['area']:.3f}")
-    nude_cols[1].metric("exposure_count", str(nude["count"]))
-    nude_cols[2].metric("exposure_score", f"{nude['score']:.3f}")
-
-    if nude["by_class"]:
-        with st.expander("NudeNet クラス別スコア", expanded=False):
-            nude_df = pd.DataFrame(
-                sorted(nude["by_class"].items(), key=lambda item: item[1], reverse=True),
-                columns=["class", "score"],
-            )
-            st.dataframe(nude_df, width="stretch", hide_index=True)
-
-    group_hits = compute_group_hits(record, rules_data.get("groups") or {}, topk=256)
-    if winning_rule_id and when_clause:
-        with st.expander(f"ルール {winning_rule_id} の when 式", expanded=True):
-            st.code(when_clause, language="text")
-            if when_summary_rows:
-                summary_df = pd.DataFrame(when_summary_rows)
-                if "result" in summary_df.columns:
-                    summary_df["result"] = summary_df["result"].map(
-                        lambda flag: "✅" if flag else ("❌" if flag is False else "-")
-                    )
-                st.dataframe(summary_df, width="stretch", hide_index=True)
-            else:
-                st.caption("when 式で比較可能なメトリクスが見つかりません。")
-
-    if feature_values:
-        st.subheader("features スコア")
-        feature_defs = rules_data.get("features") or {}
-        sorted_features = sorted(
-            feature_values.items(),
-            key=lambda item: (item[1] is None, -float(item[1]) if isinstance(item[1], (int, float)) else 0.0),
-        )
-        for name, value in sorted_features:
-            label = _format_feature_value(name, value)
-            related_groups = _related_groups_for_feature(name, feature_defs, group_hits)
-            with st.expander(label, expanded=False):
-                if related_groups:
-                    for group_name in related_groups:
-                        items = group_hits.get(group_name) or []
-                        if not items:
-                            continue
-                        chart_data = pd.DataFrame(items, columns=["tag", "score"]).head(20)
-                        chart = (
-                            alt.Chart(chart_data)
-                            .mark_bar()
-                            .encode(
-                                x=alt.X("score:Q", title="score"),
-                                y=alt.Y("tag:N", sort="-x", title="tag"),
-                                tooltip=["tag", alt.Tooltip("score:Q", format=".4f")],
-                            )
-                        )
-                        st.altair_chart(chart)
-                else:
-                    st.caption("関連タグのヒットはありません。")
+            nsfw_value = None
+    elif is_nsfw_flag is None:
+        nsfw_value = None
     else:
-        st.info("metrics.dsl.features が見つかりません。v2 ルールで再スキャンすると詳細が表示されます。")
+        nsfw_value = bool(is_nsfw_flag)
 
+    q_value = _safe_float(ratings.get("q"))
+    e_value = _safe_float(ratings.get("e"))
+    qe_margin_value = _safe_float(metrics.get("qe_margin"))
+    if qe_margin_value is None:
+        qe_margin_value = _safe_float(feature_values.get("qe_margin"))
+    if qe_margin_value is None and q_value is not None and e_value is not None:
+        qe_margin_value = max(0.0, e_value - q_value)
 
-def _default_visible_columns(columns: list[str], preset: str) -> list[str]:
-    preset_columns = COLUMN_PRESETS.get(preset)
-    if preset_columns is None:
-        return _dedup_preserve_order(col for col in columns if col != "thumbnail")
-    resolved = _dedup_preserve_order(col for col in preset_columns if col in columns)
-    return resolved or _dedup_preserve_order(col for col in columns if col != "thumbnail")
+    exposure_area = _safe_float(metrics.get("exposure_area"))
+    exposure_count_raw = metrics.get("exposure_count")
+    exposure_count = (
+        exposure_count_raw
+        if isinstance(exposure_count_raw, int)
+        else int(_safe_float(exposure_count_raw) or 0)
+    )
+    exposure_score = _safe_float(metrics.get("exposure_score"))
+    nsfw_general_sum = _safe_float(metrics.get("nsfw_general_sum"))
+    placement_risk = _safe_float(
+        metrics.get("placement_risk") or metrics.get("placement_risk_pre")
+    )
 
+    def fmt_float(value: float | None) -> str:
+        return "—" if value is None else f"{value:.3f}"
 
-def _format_feature_value(name: str, value: Any) -> str:
-    if isinstance(value, (int, float)):
-        icon = "⚪"
-        if value >= 0.9:
-            icon = "🔴"
-        elif value >= 0.7:
-            icon = "🟠"
-        return f"{icon} {name}: {value:.3f}"
-    return f"⚪ {name}: {value}"
+    def fmt_bool(value: bool | None) -> str:
+        if value is None:
+            return "—"
+        return "true" if bool(value) else "false"
+
+    thumb_col, info_col = st.columns([1, 2], gap="large")
+
+    with thumb_col:
+        thumb_path = get_thumbnail_for_record(record)
+        if thumb_path.exists():
+            st.image(str(thumb_path), width=260)
+        else:
+            st.image(str(thumb_path))
+
+    with info_col:
+        message_link = record.get("message_link")
+        if message_link:
+            st.markdown(f"[message_link]({message_link})")
+        header_line = f"**{sev_badge}** · **{rule_title}**"
+        st.markdown(header_line)
+        if rule_id and rule_id != "-":
+            st.caption(f"rule_id: {rule_id}")
+        st.write(summary_text)
+        st.write(f"is_nsfw_channel: {fmt_bool(nsfw_value)}")
+        st.write(
+            "rating_questionable: "
+            f"{fmt_float(q_value)} / rating_explicit: {fmt_float(e_value)} / qe_margin: {fmt_float(qe_margin_value)}"
+        )
+
+        kpi_cols = st.columns(3, gap="small")
+        with kpi_cols[0]:
+            st.markdown("**Exposure**")
+            st.write(f"count: {exposure_count}")
+            st.write(f"area: {fmt_float(exposure_area)}")
+            st.write(f"score: {fmt_float(exposure_score)}")
+        with kpi_cols[1]:
+            st.markdown("**Context**")
+            st.write(f"nsfw_general_sum: {fmt_float(nsfw_general_sum)}")
+            st.write(f"placement_risk: {fmt_float(placement_risk)}")
+        with kpi_cols[2]:
+            st.markdown("**wd14 ratings**")
+            st.write(f"g: {fmt_float(_safe_float(ratings.get('g')))}")
+            st.write(f"s: {fmt_float(_safe_float(ratings.get('s')))}")
+            st.write(f"q: {fmt_float(q_value)}")
+            st.write(f"e: {fmt_float(e_value)}")
+
+    rules_data = _load_rules_for_detail(rules_path)
+    groups_map = rules_data.get("groups") or {}
+    group_hits = compute_group_hits(record, groups_map, topk=256)
+    available_groups = set(groups_map.keys()) if isinstance(groups_map, dict) else set()
+    resolved_groups = resolve_category_groups(available_groups)
+
+    st.markdown("---")
+    category_cols = st.columns(4, gap="small")
+    for idx, category in enumerate(("minor", "animal", "nonconsent", "gore")):
+        with category_cols[idx]:
+            st.markdown(f"**{CATEGORY_LABELS.get(category, category)}**")
+            feature_items = _category_feature_entries(
+                feature_values, CATEGORY_PREFIXES.get(category, tuple())
+            )
+            if feature_items:
+                st.caption("features (>0)")
+                for name, value in feature_items:
+                    label = name.replace("_", " ")
+                    st.write(f"- {label}: {value:.3f}")
+            else:
+                st.caption("features (>0): —")
+            st.caption("topk タグ")
+            df_hits = _category_topk_dataframe(
+                group_hits,
+                resolved_groups.get(category, set()),
+                CATEGORY_PREFIXES.get(category, tuple()),
+            )
+            _render_topk_chart(df_hits)
+
+    if reason_lines:
+        st.markdown("---")
+        st.markdown("**reasons（詳細）**")
+        for line in reason_lines:
+            st.write(f"- {line}")
 
 
 def _extract_wd14_rating(record: dict) -> dict[str, float | None]:
@@ -1194,73 +1269,7 @@ def _load_rules_for_detail(rules_path: Path) -> dict[str, Any]:
     return {"groups": groups, "features": raw_features, "rules": rules_map}
 
 
-COMPARISON_PATTERN = re.compile(r"([A-Za-z0-9_.]+)\s*(>=|<=|>|<|==)\s*(T_[A-Za-z0-9_]+|\d+(?:\.\d+)?)")
-GROUP_TOKEN_PATTERN = re.compile(r"'([^']+)'")
-
-
-def _build_when_summary(
-    when_clause: str,
-    record: dict,
-    feature_values: dict[str, Any],
-    feature_defs: dict[str, Any],
-) -> list[dict[str, Any]]:
-    if not when_clause:
-        return []
-    numeric_values: dict[str, float] = {}
-    for name, value in feature_values.items():
-        numeric = _safe_float(value)
-        if numeric is not None:
-            numeric_values[name] = numeric
-    metrics = record.get("metrics", {}) or {}
-    for name, value in metrics.items():
-        numeric = _safe_float(value)
-        if numeric is not None:
-            numeric_values.setdefault(name, numeric)
-
-    threshold_values: dict[str, float] = {}
-    for name, value in feature_defs.items():
-        numeric = _safe_float(value)
-        if numeric is not None:
-            threshold_values[name] = numeric
-
-    rows: list[dict[str, Any]] = []
-    for lhs, operator, rhs in COMPARISON_PATTERN.findall(when_clause):
-        metric_name = lhs.split(".")[-1]
-        current_value = numeric_values.get(metric_name)
-        threshold_value: float | None
-        threshold_label = rhs
-        if rhs.startswith("T_"):
-            threshold_value = threshold_values.get(rhs)
-        else:
-            threshold_value = _safe_float(rhs)
-        result = None
-        if current_value is not None and threshold_value is not None:
-            result = _evaluate_comparison(current_value, operator, threshold_value)
-        rows.append(
-            {
-                "metric": metric_name,
-                "value": current_value,
-                "operator": operator,
-                "threshold_label": threshold_label,
-                "threshold": threshold_value,
-                "result": result,
-            }
-        )
-    return rows
-
-
-def _evaluate_comparison(value: float, operator: str, threshold: float) -> bool:
-    if operator == ">=":
-        return value >= threshold
-    if operator == ">":
-        return value > threshold
-    if operator == "<=":
-        return value <= threshold
-    if operator == "<":
-        return value < threshold
-    if operator == "==":
-        return value == threshold
-    return False
+REASON_NUMBER_PATTERN = re.compile(r"[-+]?\d*\.?\d+")
 
 
 def compute_group_hits(
@@ -1312,31 +1321,6 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _related_groups_for_feature(
-    feature_name: str,
-    feature_defs: dict[str, Any],
-    group_hits: dict[str, list[tuple[str, float]]],
-) -> list[str]:
-    expr = feature_defs.get(feature_name)
-    if expr is None:
-        return []
-    if isinstance(expr, str):
-        text = expr
-    else:
-        try:
-            text = json.dumps(expr, ensure_ascii=False)
-        except TypeError:
-            text = str(expr)
-    related: list[str] = []
-    seen: set[str] = set()
-    for token in GROUP_TOKEN_PATTERN.findall(text or ""):
-        if token in group_hits and token not in seen:
-            seen.add(token)
-            related.append(token)
-    return related
-
 
 def _discover_feature_ids(rules_path: Path | None) -> list[str]:
     if rules_path is None:
