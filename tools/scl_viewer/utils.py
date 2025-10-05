@@ -19,7 +19,16 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.config import get_settings
 from app.io.stream import iter_jsonl
+from app.profiles import (
+    ContextPaths,
+    ContextResolveResult,
+    PartitionPaths,
+    PROFILES_ROOT,
+    list_partitions,
+    DEFAULT_PROFILE,
+)
 from app.triage import P3_CSV_HEADER
 
 P0_HEADER = [
@@ -116,12 +125,74 @@ def read_report_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def merge_p0_sources(dest: Path) -> Path | None:
+def available_profiles(default: str | None = None) -> list[str]:
+    if PROFILES_ROOT.exists():
+        entries = sorted(p.name for p in PROFILES_ROOT.iterdir() if p.is_dir())
+    else:
+        entries = []
+    if default and default not in entries:
+        entries.insert(0, default)
+    if not entries:
+        entries = [DEFAULT_PROFILE]
+    return entries
+
+
+def available_partition_dates(profile: str, *, stage: str = "p3", limit: int = 30) -> list[str]:
+    dates = [d.isoformat() for d in list_partitions(profile, stage, limit=limit)]
+    return dates
+
+
+def build_context(
+    *,
+    profile: str | None = None,
+    date: str | None = None,
+) -> ContextResolveResult:
+    settings = get_settings()
+    context = settings.build_profile_context(profile=profile, date=date)
+    return ContextResolveResult(
+        context=context,
+        paths=ContextPaths.for_context(context),
+    )
+
+
+def format_context_notice(context_result: ContextResolveResult) -> str:
+    parts = [
+        f"profile={context_result.context.profile}",
+        f"date={context_result.context.iso_date}",
+    ]
+    if context_result.fallback_reason:
+        parts.append(f"fallback={context_result.fallback_reason}")
+    return ", ".join(parts)
+
+
+def merge_p0_sources(dest: Path, *, partitions: PartitionPaths | None = None) -> Path | None:
     dest = dest.resolve()
-    single = Path("out/p0_scan.csv")
-    shards_dir = Path("out/p0")
-    shard_paths = sorted(shards_dir.glob("shard_*.csv"))
-    if single.exists():
+    single_candidates: list[Path] = []
+    shard_candidates: list[Path] = []
+    if partitions is not None:
+        single_candidates.append(partitions.stage_file("p0"))
+        shard_candidates.append(partitions.stage_dir("p0") / "shards")
+    single_candidates.append(Path("out/p0_scan.csv"))
+    shard_candidates.append(Path("out/p0"))
+
+    single: Path | None = None
+    for candidate in single_candidates:
+        candidate = candidate.resolve()
+        if candidate.exists():
+            single = candidate
+            break
+
+    shards_dir: Path | None = None
+    for shard_root in shard_candidates:
+        shard_root = shard_root.resolve()
+        if shard_root.exists():
+            shards_dir = shard_root
+            break
+
+    shard_paths: list[Path] = []
+    if shards_dir is not None and shards_dir.exists():
+        shard_paths = sorted(shards_dir.glob("shard_*.csv"))
+    if single is not None and single.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(single, dest)
         return dest
@@ -293,6 +364,8 @@ def run_cli_scan(
     limit: int = 0,
     offset: int = 0,
     dsl_mode: str = "warn",
+    profile: str,
+    date: str | None,
     extra_args: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
@@ -311,7 +384,11 @@ def run_cli_scan(
         str(limit),
         "--offset",
         str(offset),
+        "--profile",
+        profile,
     ]
+    if date:
+        command.extend(["--date", date])
     if p0 is not None:
         command.extend(["--p0", str(p0)])
     if extra_args:
@@ -324,6 +401,8 @@ def run_cli_report(
     findings: Path,
     out_path: Path,
     severity: str | None = None,
+    profile: str,
+    date: str | None,
     extra_args: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
@@ -334,7 +413,11 @@ def run_cli_report(
         str(findings),
         "--out",
         str(out_path),
+        "--profile",
+        profile,
     ]
+    if date:
+        command.extend(["--date", date])
     if severity and severity.lower() != "all":
         command.extend(["--severity", severity])
     if extra_args:
@@ -349,6 +432,8 @@ def run_cli_ab(
     rules_b: Path,
     out_dir: Path,
     sample_diff: int = 0,
+    profile: str,
+    date: str | None,
     extra_args: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
@@ -363,7 +448,11 @@ def run_cli_ab(
         str(rules_b),
         "--out-dir",
         str(out_dir),
+        "--profile",
+        profile,
     ]
+    if date:
+        command.extend(["--date", date])
     if sample_diff:
         command.extend(["--sample-diff", str(sample_diff)])
     if extra_args:
@@ -371,7 +460,13 @@ def run_cli_ab(
     return _run_cli(command)
 
 
-def run_cli_contract_report(*, report_path: Path, extra_args: Sequence[str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli_contract_report(
+    *,
+    report_path: Path,
+    profile: str,
+    date: str | None,
+    extra_args: Sequence[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     command = [
         sys.executable,
         "-m",
@@ -379,7 +474,11 @@ def run_cli_contract_report(*, report_path: Path, extra_args: Sequence[str] | No
         "check-report",
         "--path",
         str(report_path),
+        "--profile",
+        profile,
     ]
+    if date:
+        command.extend(["--date", date])
     if extra_args:
         command.extend(extra_args)
     return _run_cli(command)

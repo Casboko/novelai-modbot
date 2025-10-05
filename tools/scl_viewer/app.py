@@ -22,7 +22,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.batch_loader import ImageRequest, load_images
+from app.config import get_settings
 from app.local_cache import resolve_local_file
+from app.profiles import PartitionPaths
 from tools.scl_viewer import utils
 
 TMP_DIR = Path("tools/scl_viewer/tmp")
@@ -38,6 +40,9 @@ REPORT_PATH = TMP_DIR / "report.csv"
 RULES_COMPILED_PATH = TMP_DIR / "rules_compiled.yaml"
 P0_MERGED_PATH = TMP_DIR / "p0_merged.csv"
 AB_DIR = TMP_DIR / "ab"
+
+SETTINGS = get_settings()
+BASE_CONTEXT = SETTINGS.build_profile_context()
 
 SEVERITY_ORDER = ["red", "orange", "yellow", "green"]
 SEVERITY_BADGES = {
@@ -280,7 +285,6 @@ def _ensure_placeholder_thumb() -> Path:
     return PLACEHOLDER_THUMB
 DEFAULT_RULES = Path("configs/rules_v2.yaml")
 DEFAULT_THRESHOLDS = Path("configs/scl/scl_thresholds.yaml")
-DEFAULT_ANALYSIS = Path("out/p2/p2_analysis_all.jsonl")
 DEFAULT_RULES_PREV = Path("configs/rules_v2_prev.yaml")
 
 COLUMN_PRESETS: dict[str, list[str] | None] = {
@@ -507,11 +511,11 @@ def main() -> None:
         finally:
             mark_run_handled()
     if sidebar_state.report_clicked:
-        handle_report(action_placeholder)
+        handle_report(action_placeholder, sidebar_state)
     if sidebar_state.ab_clicked:
         handle_ab(action_placeholder, sidebar_state)
     if sidebar_state.contract_clicked:
-        handle_contract(action_placeholder)
+        handle_contract(action_placeholder, sidebar_state)
 
     findings_records = st.session_state.get("findings_records")
     if findings_records:
@@ -527,6 +531,10 @@ def main() -> None:
         render_ab_outputs()
 @dataclass
 class SidebarState:
+    profile: str
+    date: str
+    context_result: utils.ContextResolveResult
+    context_notice: str
     rules_path: Path
     thresholds_path: Path | None
     analysis_path: Path
@@ -547,22 +555,43 @@ class SidebarState:
 def render_sidebar() -> SidebarState:
     with st.sidebar:
         st.header("パラメータ")
+
+        base_profile = BASE_CONTEXT.profile
+        profiles = utils.available_profiles(base_profile)
+        profile_index = profiles.index(base_profile) if base_profile in profiles else 0
+        profile = st.selectbox("Profile", options=profiles, index=profile_index)
+
+        partition_dates = utils.available_partition_dates(profile)
+        default_date = partition_dates[0] if partition_dates else SETTINGS.build_profile_context(profile=profile).iso_date
+        date_value = st.text_input(
+            "Partition Date",
+            value=default_date,
+            help="YYYY-MM-DD / today / yesterday。空欄で既定値",
+        ).strip()
+        context_result = utils.build_context(profile=profile, date=date_value or None)
+        context_notice = utils.format_context_notice(context_result)
+        st.caption(context_notice)
+
         rules_path = Path(
             st.text_input("Rules (B)", value=str(DEFAULT_RULES), help="チューニング対象のルール定義")
-        )
+        ).expanduser()
         thresholds_value = st.text_input(
             "閾値ファイル", value=str(DEFAULT_THRESHOLDS), help="configs/scl/scl_thresholds.yaml"
         )
-        thresholds_path = Path(thresholds_value)
+        thresholds_path = Path(thresholds_value).expanduser()
         if not thresholds_path.exists():
             thresholds_path = None
-        analysis_path = Path(
-            st.text_input("Analysis JSONL", value=str(DEFAULT_ANALYSIS), help="out/p2 の統合 JSONL")
-        )
+        default_analysis = context_result.paths.stage_file("p2")
+        analysis_input = st.text_input(
+            "Analysis JSONL",
+            value=str(default_analysis),
+            help="プロファイルの p2 JSONL。必要に応じて上書き",
+        ).strip()
+        analysis_path = Path(analysis_input).expanduser() if analysis_input else default_analysis
         rules_prev_input = st.text_input(
             "Rules (A)", value=str(DEFAULT_RULES_PREV), help="比較用の旧ルール"
         )
-        rules_prev_path = Path(rules_prev_input) if rules_prev_input else None
+        rules_prev_path = Path(rules_prev_input).expanduser() if rules_prev_input else None
         limit = int(st.number_input("Limit", min_value=0, value=800, step=100))
         offset = int(st.number_input("Offset", min_value=0, value=0, step=50))
         severity_filter = st.multiselect(
@@ -585,7 +614,12 @@ def render_sidebar() -> SidebarState:
         report_clicked = st.button("Report (cli_report)")
         ab_clicked = st.button("A/B diff (cli_rules_ab)")
         contract_clicked = st.button("契約チェック (cli_contract)")
+
     return SidebarState(
+        profile=profile,
+        date=date_value or None,
+        context_result=context_result,
+        context_notice=context_notice,
         rules_path=rules_path,
         thresholds_path=thresholds_path,
         analysis_path=analysis_path,
@@ -608,7 +642,8 @@ def handle_run(placeholder, state: SidebarState) -> None:
     with placeholder.container():
         st.write("### Run 実行ログ")
         try:
-            merged = utils.merge_p0_sources(P0_MERGED_PATH)
+            partitions = PartitionPaths(state.context_result.context)
+            merged = utils.merge_p0_sources(P0_MERGED_PATH, partitions=partitions)
         except utils.P0MergeError as exc:
             st.error(str(exc))
             return
@@ -632,6 +667,9 @@ def handle_run(placeholder, state: SidebarState) -> None:
             p0_path = None
         else:
             p0_path = merged
+        if not state.analysis_path.exists():
+            st.error(f"Analysis path not found: {state.analysis_path}")
+            return
         try:
             result = utils.run_cli_scan(
                 analysis=state.analysis_path,
@@ -640,6 +678,8 @@ def handle_run(placeholder, state: SidebarState) -> None:
                 p0=p0_path,
                 limit=state.limit,
                 offset=state.offset,
+                profile=state.context_result.context.profile,
+                date=state.date,
                 extra_args=extra_args,
             )
         except (utils.CliCommandError, FileNotFoundError) as exc:
@@ -650,18 +690,24 @@ def handle_run(placeholder, state: SidebarState) -> None:
         st.success("cli_scan 完了")
         st.code(result.stdout)
         st.session_state["rules_effective_path"] = str(compiled.rules_path)
+        st.session_state["context_notice"] = state.context_notice
         st.cache_data.clear()
-        load_findings_into_state()
+        load_findings_into_state(state.context_result)
 
 
-def handle_report(placeholder) -> None:
+def handle_report(placeholder, state: SidebarState) -> None:
     with placeholder.container():
         st.write("### Report 実行ログ")
         if not FINDINGS_PATH.exists():
             st.warning("先に Run を実行し findings を生成してください。")
             return
         try:
-            result = utils.run_cli_report(findings=FINDINGS_PATH, out_path=REPORT_PATH)
+            result = utils.run_cli_report(
+                findings=FINDINGS_PATH,
+                out_path=REPORT_PATH,
+                profile=state.context_result.context.profile,
+                date=state.date,
+            )
         except utils.CliCommandError as exc:
             st.error(str(exc))
             st.code(exc.stderr or exc.stdout)
@@ -696,6 +742,8 @@ def handle_ab(placeholder, state: SidebarState) -> None:
                 rules_b=compiled.rules_path,
                 out_dir=AB_DIR,
                 sample_diff=200,
+                profile=state.context_result.context.profile,
+                date=state.date,
                 extra_args=extra_args,
             )
         except utils.CliCommandError as exc:
@@ -707,14 +755,18 @@ def handle_ab(placeholder, state: SidebarState) -> None:
         load_ab_outputs()
 
 
-def handle_contract(placeholder) -> None:
+def handle_contract(placeholder, state: SidebarState) -> None:
     with placeholder.container():
         st.write("### 契約チェック")
         if not REPORT_PATH.exists():
             st.warning("レポート CSV が見つかりません。先に Report を実行してください。")
             return
         try:
-            result = utils.run_cli_contract_report(report_path=REPORT_PATH)
+            result = utils.run_cli_contract_report(
+                report_path=REPORT_PATH,
+                profile=state.context_result.context.profile,
+                date=state.date,
+            )
         except utils.CliCommandError as exc:
             st.error(str(exc))
             st.code(exc.stderr or exc.stdout)
@@ -739,7 +791,7 @@ def prepare_rules(rules_path: Path, thresholds_path: Path | None) -> utils.Thres
     )
 
 
-def load_findings_into_state() -> None:
+def load_findings_into_state(context_result: utils.ContextResolveResult) -> None:
     rules_source = st.session_state.get("rules_effective_path")
     effective_rules_path = Path(rules_source) if rules_source else DEFAULT_RULES
     findings_key = _cache_key_for_path(FINDINGS_PATH)
@@ -756,6 +808,7 @@ def load_findings_into_state() -> None:
         return
     st.session_state["findings_records"] = records
     st.session_state["findings_df"] = df
+    st.session_state["context_notice"] = utils.format_context_notice(context_result)
 
 
 def load_ab_outputs() -> None:
@@ -779,6 +832,10 @@ def load_ab_outputs() -> None:
 def render_findings(records: list[dict], state: SidebarState, layout_mode: str) -> None:
     rules_source = st.session_state.get("rules_effective_path")
     rules_path = Path(rules_source) if rules_source else state.rules_path
+
+    context_notice = st.session_state.get("context_notice", state.context_notice)
+    if context_notice:
+        st.caption(context_notice)
 
     df = st.session_state.get("findings_df")
     if df is None:

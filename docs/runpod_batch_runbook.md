@@ -113,8 +113,8 @@ strict で実行したい場合は `MODBOT_DSL_MODE=strict` を環境変数と�
 
 ```bash
 python scripts/split_index.py \
-  --input out/p0_scan.csv \
-  --out-dir out/p0 \
+  --profile current \
+  --date 2025-10-01 \
   --shards 10
 ```
 
@@ -206,9 +206,9 @@ python -m app.cli_rules_ab \
 
 | フェーズ | 主成果物 | メトリクス |
 | --- | --- | --- |
-| p1 | `out/p1/p1_wd14_*.jsonl` | `out/metrics/p1_*.json` |
-| p2 | `out/p2/p2_analysis_*.jsonl` | `out/metrics/p2_*.json` |
-| p3 | `out/p3/p3_decision_*.jsonl` | `out/metrics/p3_run.json`, `out/metrics/p3_ab_compare.json` |
+| p1 | `out/profiles/<profile>/p1/p1_YYYY-MM-DD.jsonl` | `out/profiles/<profile>/metrics/p1_metrics_YYYY-MM-DD.json` |
+| p2 | `out/profiles/<profile>/p2/p2_YYYY-MM-DD.jsonl` | `out/profiles/<profile>/metrics/p2_metrics_YYYY-MM-DD.json` |
+| p3 | `out/profiles/<profile>/p3/findings_YYYY-MM-DD.jsonl` | `out/profiles/<profile>/metrics/p3_run.json`, `out/profiles/<profile>/metrics/p3_ab_compare.json` |
 
 #### p1/p2 メトリクスの集約
 
@@ -231,8 +231,8 @@ def merge(pattern, out_path):
     with open(out_path, "w", encoding="utf-8") as out:
         json.dump(acc, out, ensure_ascii=False, indent=2)
 
-merge("out/metrics/p1_*.json", "out/metrics/p1.json")
-merge("out/metrics/p2_*.json", "out/metrics/p2.json")
+merge("out/profiles/current/metrics/p1_metrics_*.json", "out/profiles/current/metrics/p1_metrics.json")
+merge("out/profiles/current/metrics/p2_metrics_*.json", "out/profiles/current/metrics/p2_metrics.json")
 PY
 ```
 
@@ -243,23 +243,23 @@ PY
 また、findings の各レコードには `metrics.eval_ms`（評価処理1件あたりのレイテンシ、ミリ秒・小数第3位丸め）が追加されました。レビュー時は以下のように `jq` などで抜き出して比較できます。
 
 ```bash
-jq -r '.metrics.eval_ms // empty' out/p3/p3_decision_all.jsonl | head
+jq -r '.metrics.eval_ms // empty' out/profiles/current/p3/findings_2025-10-01.jsonl | head
 ```
 
 ### 5.2 レビュー用成果物
 
 | 用途 | 出力例 |
 | --- | --- |
-| A/B 差分確認 | `out/exports/p3_ab_diff.csv` |
-| 差分サンプル（JSONL） | `out/exports/p3_ab_diff_samples.jsonl` |
-| 不確実域サンプル（Top200） | `out/review/uncertain_top200.csv` |
+| A/B 差分確認 | `out/profiles/<profile>/exports/p3_ab_diff.csv` |
+| 差分サンプル（JSONL） | `out/profiles/<profile>/exports/p3_ab_diff_samples.jsonl` |
+| 不確実域サンプル（Top200） | `out/profiles/<profile>/review/uncertain_top200.csv` |
 
 **不確実域サンプルの抽出**（最小ツール版）:
 
 ```bash
 python tools/export_uncertain.py \
-  --analysis out/p2/p2_analysis_all.jsonl \
-  --out out/review/uncertain_top200.csv \
+  --profile current --date 2025-10-01 \
+  --out out/profiles/current/review/uncertain_top200.csv \
   --q-thr 0.35 --e-thr 0.20 --eps 0.02 --topn 200
 ```
 
@@ -277,15 +277,15 @@ python tools/export_uncertain.py \
 ## 7. 障害時の再開
 
 - **p1/p2**: shard ごとに `.tmp` → 完了時に rename。`--resume` を付けて再実行すれば未完 shard のみ再開します。
-- **p3**: `/scan` 実行前に `--dry-run` で件数・速度を確認し、採用前に `cli_rules_ab` で差分をレビューします。差分サンプルは `out/exports/p3_ab_diff_samples.jsonl` に出力されます。
+- **p3**: `/scan` 実行前に `--dry-run` で件数・速度を確認し、採用前に `cli_rules_ab` で差分をレビューします。差分サンプルは `out/profiles/<profile>/exports/p3_ab_diff_samples.jsonl` に出力されます。
 
 ---
 
 ## 8. 受入条件（Definition of Done）
 
 - [ ] Runpod 上で p1/p2/p3 が本 Runbook の手順だけで再現できる
-- [ ] `out/metrics/p1.json`, `out/metrics/p2.json`, `out/metrics/p3_run.json`, `out/metrics/p3_ab_compare.json` が生成される
-- [ ] `out/exports/p3_ab_diff.csv` と `out/review/uncertain_top200.csv` がレビューに利用できる
+- [ ] `out/profiles/<profile>/metrics/p1_metrics_YYYY-MM-DD.json`, `out/profiles/<profile>/metrics/p2_metrics_YYYY-MM-DD.json`, `out/profiles/<profile>/metrics/p3_run.json`, `out/profiles/<profile>/metrics/p3_ab_compare.json` が生成される
+- [ ] `out/profiles/<profile>/exports/p3_ab_diff.csv` と `out/profiles/<profile>/review/uncertain_top200.csv` がレビューに利用できる
 - [ ] Discord API の rate limit (50 rps) を超過せず 429 が発生した際は調整が記録されている
 - [ ] Network Volume / S3 互換 API を使った入出力同期手順が確認済み
 
@@ -322,6 +322,6 @@ python tools/export_uncertain.py \
 
 - 出力契約の詳細: `docs/contracts/p3.md`
 - チェック手順:
-  - `python -m app.cli_contract check-findings --path out/p3_findings.jsonl`
-  - `python -m app.cli_contract check-report --path out/p3_report.csv`
+  - `python -m app.cli_contract check-findings --profile current --date 2025-10-01`
+  - `python -m app.cli_contract check-report   --profile current --date 2025-10-01`
 - CI やローカル検証で上記コマンドの終了コードが 0 であることを確認し、破壊的変更を早期検知します。
