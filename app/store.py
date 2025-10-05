@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import aiosqlite
+from aiosqlite import Connection
 
 from .rules import RuleDecision
+from .profiles import DEFAULT_PROFILE
 
 
 @dataclass
@@ -41,11 +43,16 @@ class Ticket:
     due_at: datetime
     status: str
     executor_id: int
+    profile: str
+    partition_date: str
     created_at: datetime
     updated_at: datetime
 
 
 class TicketStore:
+    SCHEMA_VERSION = 2
+    PARTITION_SENTINEL = "1970-01-01"
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self._db: Optional[aiosqlite.Connection] = None
@@ -62,36 +69,7 @@ class TicketStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL;")
         await self._db.execute("PRAGMA foreign_keys=ON;")
-        await self._db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS tickets (
-              ticket_id TEXT PRIMARY KEY,
-              guild_id INTEGER NOT NULL,
-              channel_id INTEGER NOT NULL,
-              message_id INTEGER NOT NULL,
-              author_id INTEGER NOT NULL,
-              severity TEXT NOT NULL,
-              rule_id TEXT,
-              reason TEXT,
-              message_link TEXT NOT NULL,
-              due_at TEXT NOT NULL,
-              status TEXT NOT NULL,
-              executor_id INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS ticket_logs (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ticket_id TEXT NOT NULL,
-              actor_id INTEGER NOT NULL,
-              action TEXT NOT NULL,
-              detail TEXT,
-              created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_tickets_due ON tickets(status, due_at);
-            """
-        )
-        await self._db.commit()
+        await self._run_migrations()
 
     async def close(self) -> None:
         if self._db is not None:
@@ -119,18 +97,23 @@ class TicketStore:
         message_link: str,
         due_at: datetime,
         executor_id: int,
+        profile: Optional[str] = None,
+        partition_date: Optional[str] = None,
     ) -> tuple[Ticket, bool]:
         db = await self._require_db()
         now = datetime.now(timezone.utc)
         due_value = self._to_iso(due_at)
         now_iso = self._to_iso(now)
+        resolved_profile = profile or DEFAULT_PROFILE
+        resolved_partition = partition_date or self.PARTITION_SENTINEL
         cursor = await db.execute(
             """
             INSERT INTO tickets (
               ticket_id, guild_id, channel_id, message_id, author_id,
               severity, rule_id, reason, message_link, due_at,
-              status, executor_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              status, executor_id, profile, partition_date,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticket_id,
@@ -145,6 +128,8 @@ class TicketStore:
                 due_value,
                 "notified",
                 executor_id,
+                resolved_profile,
+                resolved_partition,
                 now_iso,
                 now_iso,
             ),
@@ -261,6 +246,83 @@ class TicketStore:
             due_at=self._parse_iso(row["due_at"]),
             status=row["status"],
             executor_id=row["executor_id"],
+            profile=row["profile"],
+            partition_date=row["partition_date"],
             created_at=self._parse_iso(row["created_at"]),
             updated_at=self._parse_iso(row["updated_at"]),
         )
+
+    async def _run_migrations(self) -> None:
+        db = self._db
+        assert db is not None
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS tickets (
+              ticket_id TEXT PRIMARY KEY,
+              guild_id INTEGER NOT NULL,
+              channel_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              author_id INTEGER NOT NULL,
+              severity TEXT NOT NULL,
+              rule_id TEXT,
+              reason TEXT,
+              message_link TEXT NOT NULL,
+              due_at TEXT NOT NULL,
+              status TEXT NOT NULL,
+              executor_id INTEGER NOT NULL,
+              profile TEXT NOT NULL DEFAULT 'current',
+              partition_date TEXT NOT NULL DEFAULT '1970-01-01',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ticket_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ticket_id TEXT NOT NULL,
+              actor_id INTEGER NOT NULL,
+              action TEXT NOT NULL,
+              detail TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tickets_due ON tickets(status, due_at);
+            """
+        )
+        version = await self._get_user_version(db)
+        if version < 2:
+            await self._ensure_ticket_columns(db)
+            await db.execute(f"PRAGMA user_version={self.SCHEMA_VERSION};")
+        await db.commit()
+
+    async def _get_user_version(self, db: Connection) -> int:
+        cursor = await db.execute("PRAGMA user_version;")
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    async def _ensure_ticket_columns(self, db: Connection) -> None:
+        columns = await self._list_columns(db, "tickets")
+        if "profile" not in columns:
+            profile_default = DEFAULT_PROFILE.replace("'", "''")
+            await db.execute(
+                f"ALTER TABLE tickets ADD COLUMN profile TEXT NOT NULL DEFAULT '{profile_default}'",
+            )
+        else:
+            profile_default = DEFAULT_PROFILE.replace("'", "''")
+        await db.execute(
+            f"UPDATE tickets SET profile='{profile_default}' WHERE profile IS NULL OR profile=''",
+        )
+        if "partition_date" not in columns:
+            partition_default = self.PARTITION_SENTINEL.replace("'", "''")
+            await db.execute(
+                f"ALTER TABLE tickets ADD COLUMN partition_date TEXT NOT NULL DEFAULT '{partition_default}'",
+            )
+        else:
+            partition_default = self.PARTITION_SENTINEL.replace("'", "''")
+        await db.execute(
+            f"UPDATE tickets SET partition_date='{partition_default}' WHERE partition_date IS NULL OR partition_date=''",
+        )
+
+    async def _list_columns(self, db: Connection, table: str) -> set[str]:
+        cursor = await db.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {str(row[1]) for row in rows}

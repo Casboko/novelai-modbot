@@ -7,7 +7,7 @@ import re
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence, TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -17,18 +17,22 @@ from .discord_client import create_client
 from .engine.group_utils import group_top_tags
 from .engine.tag_norm import normalize_pair, normalize_tag
 from .mode_resolver import has_version_mismatch, resolve_policy
-from .output_paths import (
-    default_analysis_path,
-    default_findings_path,
-    default_report_path,
-    ensure_parent,
-    resolve_analysis_path,
-    resolve_findings_path,
+from .output_paths import P2_ANALYSIS_CANDIDATES, P3_FINDINGS_CANDIDATES
+from .profiles import (
+    ContextPaths,
+    ContextResolveResult,
+    ProfileContext,
+    StageName,
+    latest_partition_date,
+    resolve_latest_partition,
 )
 from .rule_engine import RuleEngine
 from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
 from .store import Ticket, TicketStore
 from .util import parse_message_link
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .config import Settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -66,6 +70,127 @@ UTC_MIN = datetime.min.replace(tzinfo=timezone.utc)
 UTC_MAX = datetime.max.replace(tzinfo=timezone.utc)
 
 
+def create_context_factory(
+    settings: "Settings",
+) -> tuple[ProfileContext, Callable[..., ContextResolveResult]]:
+    base_context = settings.build_profile_context()
+
+    def context_factory(
+        *,
+        profile: Optional[str] = None,
+        date: Optional[str] = None,
+        stage: StageName = "p2",
+        fallback_to_legacy: bool = True,
+    ) -> ContextResolveResult:
+        requested_context = settings.build_profile_context(profile=profile, date=date)
+        fallback_reason: Optional[str] = None
+        resolved_context = requested_context
+
+        if date is None:
+            latest_date = latest_partition_date(requested_context.profile, stage)
+            if latest_date is not None:
+                resolved_context = requested_context.with_date(date_token=latest_date.isoformat())
+            else:
+                fallback_reason = "fallback=missing"
+
+        paths = ContextPaths.for_context(resolved_context)
+        if fallback_reason is None:
+            _, path_reason = resolve_latest_partition(
+                resolved_context,
+                stage,
+                fallback_to_legacy=fallback_to_legacy,
+            )
+            if path_reason is not None:
+                fallback_reason = path_reason
+
+        return ContextResolveResult(
+            context=resolved_context,
+            paths=paths,
+            fallback_reason=fallback_reason,
+        )
+
+    return base_context, context_factory
+
+
+def _merge_fallback_reason(*reasons: Optional[str]) -> Optional[str]:
+    tokens: list[str] = []
+    for reason in reasons:
+        if not reason:
+            continue
+        if reason not in tokens:
+            tokens.append(reason)
+    return ", ".join(tokens) if tokens else None
+
+
+def _format_context_notice(context: ProfileContext, fallback_reason: Optional[str]) -> str:
+    base = f"プロファイル: {context.profile} / 対象日: {context.iso_date}"
+    if fallback_reason:
+        return f"{base} / {fallback_reason}"
+    return base
+
+
+def _make_context_result(
+    context: ProfileContext,
+    fallback_reason: Optional[str] = None,
+) -> ContextResolveResult:
+    return ContextResolveResult(
+        context=context,
+        paths=ContextPaths.for_context(context),
+        fallback_reason=fallback_reason,
+    )
+
+
+def _partition_date_arg(partition_date: Optional[str]) -> Optional[str]:
+    if not partition_date:
+        return None
+    if partition_date == TicketStore.PARTITION_SENTINEL:
+        return None
+    return partition_date
+
+
+DEFAULT_FINDINGS_LOOKBACK = 7
+
+
+def _ticket_context_result(
+    context_factory: Callable[..., ContextResolveResult],
+    ticket: Ticket,
+) -> ContextResolveResult:
+    return context_factory(
+        profile=ticket.profile,
+        date=_partition_date_arg(ticket.partition_date),
+        stage="p3",
+    )
+
+
+def _iter_finding_candidates(
+    context: ProfileContext,
+    *,
+    days_back: int = DEFAULT_FINDINGS_LOOKBACK,
+    stage: StageName = "p3",
+    legacy_candidates: Iterable[Path] = (),
+) -> Iterator[tuple[ProfileContext, Path, Optional[str]]]:
+    seen_dates: set[str] = set()
+    base_paths = ContextPaths.for_context(context)
+    base_path = base_paths.stage_file(stage, ensure_parent=False)
+    yield context, base_path, None
+    seen_dates.add(context.iso_date)
+    for partition_date, path in iter_recent_findings(
+        context,
+        stage=stage,
+        days_back=days_back,
+    ):
+        date_token = partition_date.isoformat()
+        if date_token in seen_dates:
+            continue
+        candidate_context = context.with_date(date_token=date_token)
+        reason = "fallback=recent" if date_token != context.iso_date else None
+        yield candidate_context, path, reason
+        seen_dates.add(date_token)
+    for candidate in legacy_candidates:
+        if candidate.exists():
+            yield context, candidate, "fallback=legacy"
+
+
 def build_jump_link(gid: int, cid: int, mid: int) -> str:
     return f"https://discord.com/channels/{gid}/{cid}/{mid}"
 
@@ -77,9 +202,19 @@ class PreviewInfo(NamedTuple):
     is_spoiler: bool = False
 
 
-class TicketEntry(NamedTuple):
+@dataclass(slots=True)
+class RecordMatch:
+    record: dict
+    context: ProfileContext
+    fallback_reason: Optional[str] = None
+
+
+@dataclass(slots=True)
+class TicketEntry:
     ticket: Ticket
     record: dict
+    context: ProfileContext
+    fallback_reason: Optional[str] = None
 
 
 def _severity_badge(severity: str) -> str:
@@ -487,38 +622,74 @@ def _record_matches_message(record: dict, channel_id: int, message_id: int) -> b
     return False
 
 
-def find_record_for_message(channel_id: int, message_id: int) -> Optional[dict]:
-    path = resolve_findings_path()
-    if path is None or not path.exists():
-        return None
+def find_record_for_message(
+    channel_id: int,
+    message_id: int,
+    *,
+    context_result: ContextResolveResult,
+    days_back: int = DEFAULT_FINDINGS_LOOKBACK,
+    legacy_candidates: Iterable[Path] = P3_FINDINGS_CANDIDATES,
+) -> Optional[RecordMatch]:
     time_range = (UTC_MIN, UTC_MAX)
-    for record in iter_findings(path, time_range=time_range):
-        if _record_matches_message(record, channel_id, message_id):
-            return record
+    for candidate_context, path, candidate_reason in _iter_finding_candidates(
+        context_result.context,
+        days_back=days_back,
+        legacy_candidates=legacy_candidates,
+    ):
+        if not path.exists():
+            continue
+        combined_reason = _merge_fallback_reason(
+            context_result.fallback_reason,
+            candidate_reason,
+        )
+        for record in iter_findings(path, time_range=time_range):
+            if _record_matches_message(record, channel_id, message_id):
+                return RecordMatch(
+                    record=record,
+                    context=candidate_context,
+                    fallback_reason=combined_reason,
+                )
     return None
 
 
-def load_findings_index() -> dict[tuple[int, int], dict]:
-    path = resolve_findings_path()
-    if path is None or not path.exists():
-        return {}
-
+def load_findings_index(
+    context_result: ContextResolveResult,
+    *,
+    days_back: int = DEFAULT_FINDINGS_LOOKBACK,
+    legacy_candidates: Iterable[Path] = P3_FINDINGS_CANDIDATES,
+) -> dict[tuple[int, int], RecordMatch]:
     def _key(cid: Any, mid: Any) -> Optional[tuple[int, int]]:
         try:
             return int(cid), int(mid)
         except (TypeError, ValueError):
             return None
 
-    index: dict[tuple[int, int], dict] = {}
+    index: dict[tuple[int, int], RecordMatch] = {}
     time_range = (UTC_MIN, UTC_MAX)
-    for record in iter_findings(path, time_range=time_range):
-        key = _key(record.get("channel_id"), record.get("message_id"))
-        if key is not None:
-            index[key] = record
-        for msg in record.get("messages", []) or []:
-            key = _key(msg.get("channel_id"), msg.get("message_id"))
-            if key is not None and key not in index:
-                index[key] = record
+    for candidate_context, path, candidate_reason in _iter_finding_candidates(
+        context_result.context,
+        days_back=days_back,
+        legacy_candidates=legacy_candidates,
+    ):
+        if not path.exists():
+            continue
+        combined_reason = _merge_fallback_reason(
+            context_result.fallback_reason,
+            candidate_reason,
+        )
+        for record in iter_findings(path, time_range=time_range):
+            match = RecordMatch(
+                record=record,
+                context=candidate_context,
+                fallback_reason=combined_reason,
+            )
+            primary = _key(record.get("channel_id"), record.get("message_id"))
+            if primary is not None and primary not in index:
+                index[primary] = match
+            for msg in record.get("messages", []) or []:
+                key = _key(msg.get("channel_id"), msg.get("message_id"))
+                if key is not None and key not in index:
+                    index[key] = match
     return index
 
 
@@ -531,6 +702,8 @@ async def process_notification(
     channel_id: int,
     message_id: int,
     executor: discord.abc.User,
+    context_result: ContextResolveResult,
+    record_match: Optional[RecordMatch] = None,
     record: Optional[dict] = None,
     due_hours: Optional[int] = None,
 ) -> tuple[Ticket, bool, str]:
@@ -542,17 +715,28 @@ async def process_notification(
             return (
                 existing,
                 False,
-                f"既に通知済みです。期限: {due_local:%Y-%m-%d %H:%M} JST",
+                f"既に通知済みです。期限: {due_local:%Y-%m-%d %H:%M} JST\n"
+                f"{_format_context_notice(settings.build_profile_context(profile=existing.profile, date=_partition_date_arg(existing.partition_date)), None)}",
             )
+        existing_context = settings.build_profile_context(
+            profile=existing.profile,
+            date=_partition_date_arg(existing.partition_date),
+        )
         return (
             existing,
             False,
-            f"この案件は既に処理済みです (status={existing.status}).",
+            f"この案件は既に処理済みです (status={existing.status}).\n"
+            f"{_format_context_notice(existing_context, None)}",
         )
     message = await _fetch_message(client, channel_id, message_id)
     severity, rule_id, reason, author_id = _resolve_ticket_details(record, message)
     due_hours_value = due_hours if due_hours is not None else settings.due_hours
     due_jst = datetime.now(JST) + timedelta(hours=due_hours_value)
+
+    target_context = record_match.context if record_match else context_result.context
+    fallback_reason = record_match.fallback_reason if record_match else context_result.fallback_reason
+    context_notice = _format_context_notice(target_context, fallback_reason)
+
     ticket, created = await ticket_store.register_notification(
         ticket_id=ticket_id,
         guild_id=guild_id,
@@ -565,6 +749,8 @@ async def process_notification(
         message_link=build_jump_link(guild_id, channel_id, message_id),
         due_at=due_jst.astimezone(timezone.utc),
         executor_id=executor.id,
+        profile=target_context.profile,
+        partition_date=target_context.iso_date,
     )
     if not created:
         if ticket.status == "notified":
@@ -572,7 +758,8 @@ async def process_notification(
             return (
                 ticket,
                 False,
-                f"既に通知済みです。期限: {due_local:%Y-%m-%d %H:%M} JST",
+                f"既に通知済みです。期限: {due_local:%Y-%m-%d %H:%M} JST\n"
+                f"{_format_context_notice(settings.build_profile_context(profile=ticket.profile, date=_partition_date_arg(ticket.partition_date)), None)}",
             )
         return (
             ticket,
@@ -589,16 +776,19 @@ async def process_notification(
         message=message,
         due_at=due_jst,
     )
+    log_detail = content
+    if context_notice:
+        log_detail = f"{content}\n{context_notice}"
     await ticket_store.append_log(
         ticket_id=ticket.ticket_id,
         actor_id=executor.id,
         action="notify",
-        detail=content,
+        detail=log_detail,
     )
     return (
         ticket,
         created,
-        f"通知を送信しました。期限: {due_jst:%Y-%m-%d %H:%M} JST",
+        f"通知を送信しました。期限: {due_jst:%Y-%m-%d %H:%M} JST\n{context_notice}",
     )
 
 
@@ -614,6 +804,8 @@ def _ensure_record_defaults(record: Optional[dict], ticket: Ticket, message: Opt
     if ticket.reason and not base.get("reasons"):
         base["reasons"] = [ticket.reason]
     base.setdefault("message_link", ticket.message_link)
+    base.setdefault("profile", ticket.profile)
+    base.setdefault("partition_date", ticket.partition_date)
     if message:
         base.setdefault("created_at", message.created_at.astimezone(timezone.utc).isoformat())
         base.setdefault(
@@ -678,6 +870,20 @@ async def send_ticket_log(
     if channel is None:
         return
     embed = build_ticket_log_embed(ticket, action=action, result=result, record=record, message=message)
+    ticket_context = settings.build_profile_context(
+        profile=ticket.profile,
+        date=_partition_date_arg(ticket.partition_date),
+    )
+    embed.add_field(
+        name="プロファイル情報",
+        value=_format_context_notice(ticket_context, None),
+        inline=False,
+    )
+    fallback_value = None
+    if isinstance(record, dict):
+        fallback_value = record.get("fallback_reason")
+    if fallback_value:
+        embed.add_field(name="フォールバック", value=str(fallback_value), inline=False)
     await channel.send(embed=embed)
 
 
@@ -686,8 +892,20 @@ async def handle_due_ticket(
     settings,
     ticket_store: TicketStore,
     ticket: Ticket,
+    *,
+    context_factory: Callable[..., ContextResolveResult],
 ) -> None:
-    record = find_record_for_message(ticket.channel_id, ticket.message_id)
+    context_result = _ticket_context_result(context_factory, ticket)
+    match = find_record_for_message(
+        ticket.channel_id,
+        ticket.message_id,
+        context_result=context_result,
+    )
+    base_record = match.record if match else None
+    record_data = _ensure_record_defaults(base_record, ticket, None)
+    if match and match.fallback_reason and "fallback_reason" not in record_data:
+        record_data["fallback_reason"] = match.fallback_reason
+    record = record_data
     actor_id = client.user.id if client.user else 0
     try:
         message = await _fetch_message(client, ticket.channel_id, ticket.message_id)
@@ -778,6 +996,7 @@ async def process_ticket_cancel(
     *,
     ticket: Ticket,
     executor: discord.abc.User,
+    context_factory: Callable[..., ContextResolveResult],
     record: Optional[dict] = None,
 ) -> tuple[str, Optional[Ticket]]:
     if ticket.status != "notified":
@@ -785,8 +1004,20 @@ async def process_ticket_cancel(
     updated = await ticket_store.cancel_ticket(ticket.ticket_id, actor_id=executor.id)
     if updated is None:
         return "チケットが見つかりませんでした。", None
-    record_data = record or find_record_for_message(ticket.channel_id, ticket.message_id)
-    record_data = _ensure_record_defaults(record_data, updated, None)
+    if record is None:
+        context_result = _ticket_context_result(context_factory, ticket)
+        match = find_record_for_message(
+            ticket.channel_id,
+            ticket.message_id,
+            context_result=context_result,
+        )
+        base_record = match.record if match else None
+        record_data = _ensure_record_defaults(base_record, updated, None)
+        if match and match.fallback_reason and "fallback_reason" not in record_data:
+            record_data["fallback_reason"] = match.fallback_reason
+    else:
+        base_record = record
+        record_data = _ensure_record_defaults(base_record, updated, None)
     await send_ticket_log(
         client,
         settings,
@@ -802,6 +1033,8 @@ async def ticket_watcher(
     client: discord.Client,
     settings,
     ticket_store: TicketStore,
+    *,
+    context_factory: Callable[..., ContextResolveResult],
 ) -> None:
     interval = max(60, int(settings.ticket_poll_interval))
     await client.wait_until_ready()
@@ -810,7 +1043,13 @@ async def ticket_watcher(
             try:
                 due_tickets = await ticket_store.fetch_due_tickets()
                 for ticket in due_tickets:
-                    await handle_due_ticket(client, settings, ticket_store, ticket)
+                    await handle_due_ticket(
+                        client,
+                        settings,
+                        ticket_store,
+                        ticket,
+                        context_factory=context_factory,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -833,6 +1072,9 @@ def build_summary_embed(
     severity: str,
     requester: discord.User,
     time_range: Optional[tuple[datetime, datetime]] = None,
+    *,
+    context: Optional[ProfileContext] = None,
+    fallback_reason: Optional[str] = None,
 ) -> discord.Embed:
     start, end = time_range if time_range is not None else resolve_time_range(since, until)
     dominant = next((s for s in SEVERITY_ORDER if summary.severity_counts.get(s)), "green")
@@ -856,7 +1098,26 @@ def build_summary_embed(
             value=str(summary.severity_counts.get(sev, 0)),
             inline=True,
         )
-    embed.set_footer(text=f"実行者: {requester.display_name}")
+    if context is not None:
+        embed.add_field(
+            name="プロファイル",
+            value=context.profile,
+            inline=True,
+        )
+        embed.add_field(
+            name="対象日",
+            value=context.iso_date,
+            inline=True,
+        )
+    if fallback_reason:
+        embed.add_field(name="フォールバック", value=fallback_reason, inline=False)
+    footer_parts = [f"実行者: {requester.display_name}"]
+    if context is not None:
+        footer_parts.append(f"profile={context.profile}")
+        footer_parts.append(f"date={context.iso_date}")
+    if fallback_reason:
+        footer_parts.append(fallback_reason)
+    embed.set_footer(text=" ・ ".join(footer_parts))
     return embed
 
 
@@ -1019,6 +1280,7 @@ class RecordPaginatorBase(discord.ui.View):
         items: Sequence[Any],
         *,
         timeout: int = 600,
+        initial_content: Optional[str] = None,
     ) -> None:
         super().__init__(timeout=timeout)
         self.client = client
@@ -1030,6 +1292,7 @@ class RecordPaginatorBase(discord.ui.View):
         self._preview_cache: dict[tuple[int, int, str], PreviewInfo] = {}
         self._member_cache: dict[int, discord.Member] = {}
         self._current_preview: PreviewInfo | None = None
+        self._initial_content = initial_content
         self._open_message_button = discord.ui.Button(
             label="投稿を開く",
             style=discord.ButtonStyle.link,
@@ -1328,7 +1591,10 @@ class RecordPaginatorBase(discord.ui.View):
             total=len(self.items),
         )
         self._update_button_state()
-        self.message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+        send_kwargs: dict[str, Any] = {"embed": embed, "view": self, "ephemeral": True}
+        if self._initial_content:
+            send_kwargs["content"] = self._initial_content
+        self.message = await interaction.followup.send(**send_kwargs)
 
     async def _respond_refresh(self, interaction: discord.Interaction) -> None:
         if not self._has_items():
@@ -1446,8 +1712,10 @@ class ReportPaginator(RecordPaginatorBase):
         ticket_store: TicketStore,
         records: Sequence[dict],
         requester: discord.User,
+        *,
+        context_note: Optional[str] = None,
     ) -> None:
-        super().__init__(client, settings, requester, records)
+        super().__init__(client, settings, requester, records, initial_content=context_note)
         self.ticket_store = ticket_store
         self._busy_actions: set[str] = set()
         self._message_cache: dict[tuple[int, int], discord.Message] = {}
@@ -1575,7 +1843,11 @@ class ReportPaginator(RecordPaginatorBase):
         index: int,
         total: int,
     ) -> discord.Embed:
-        return build_record_embed(record, index, total, preview, author)
+        embed = build_record_embed(record, index, total, preview, author)
+        entry = self._current_entry()
+        context_notice = _format_context_notice(entry.context, entry.fallback_reason)
+        embed.add_field(name="プロファイル情報", value=context_notice, inline=False)
+        return embed
 
     def _clear_message_cache(self) -> None:
         targets = self._message_targets()
@@ -1608,6 +1880,13 @@ class ReportPaginator(RecordPaginatorBase):
                 await interaction.followup.send("メッセージを取得できませんでした。", ephemeral=True)
                 return
             record = self._current_record()
+            entry = self._current_entry()
+            context_result = _make_context_result(entry.context, entry.fallback_reason)
+            record_match = RecordMatch(
+                record=record,
+                context=entry.context,
+                fallback_reason=entry.fallback_reason,
+            )
             try:
                 guild_id = message.guild.id if message.guild else self._record_guild_id(record)
                 if guild_id is None:
@@ -1621,6 +1900,8 @@ class ReportPaginator(RecordPaginatorBase):
                     channel_id=message.channel.id,
                     message_id=message.id,
                     executor=interaction.user,
+                    context_result=context_result,
+                    record_match=record_match,
                     record=record,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1761,9 +2042,12 @@ class TicketPaginator(RecordPaginatorBase):
         ticket_store: TicketStore,
         entries: Sequence[TicketEntry],
         requester: discord.User,
+        *,
+        context_factory: Callable[..., ContextResolveResult],
     ) -> None:
         super().__init__(client, settings, requester, entries)
         self.ticket_store = ticket_store
+        self.context_factory = context_factory
 
     def _empty_message(self) -> str:
         return "通知待ちのチケットはありません。"
@@ -1819,6 +2103,7 @@ class TicketPaginator(RecordPaginatorBase):
             self.ticket_store,
             ticket=entry.ticket,
             executor=interaction.user,
+            context_factory=self.context_factory,
             record=entry.record,
         )
         if updated is not None:
@@ -1867,8 +2152,13 @@ def register_commands(
     tree: discord.app_commands.CommandTree,
     settings,
     ticket_store: TicketStore,
+    *,
+    base_context: ProfileContext,
+    context_factory: Callable[..., ContextResolveResult],
 ) -> None:
     guild = discord.Object(id=settings.guild_id) if settings.guild_id else None
+    profile_desc = f"プロファイル（省略時は {base_context.profile}）"
+    date_desc = "対象日（YYYY-MM-DD、省略時は最新パーティション）"
 
     @tree.command(name="ping", description="動作確認", guild=guild)
     async def ping(interaction: discord.Interaction) -> None:
@@ -1892,7 +2182,13 @@ def register_commands(
             await interaction.followup.send("メッセージリンクの形式が正しくありません。", ephemeral=True)
             return
 
-        record = find_record_for_message(channel_id, message_id)
+        context_result = context_factory(profile=profile, date=date, stage="p3")
+        record_match = find_record_for_message(
+            channel_id,
+            message_id,
+            context_result=context_result,
+        )
+        record = record_match.record if record_match else None
         try:
             _, _, response = await process_notification(
                 client,
@@ -1902,6 +2198,8 @@ def register_commands(
                 channel_id=channel_id,
                 message_id=message_id,
                 executor=interaction.user,
+                context_result=context_result,
+                record_match=record_match,
                 record=record,
                 due_hours=due_hours,
             )
@@ -1919,6 +2217,8 @@ def register_commands(
         until="終了日（未指定は現在時刻）",
         severity="対象とする深刻度（未指定は全件）",
         post_summary="モデログへサマリを投稿",
+        profile=profile_desc,
+        date=date_desc,
     )
     @app_commands.choices(
         severity=[
@@ -1937,6 +2237,8 @@ def register_commands(
         until: Optional[str] = None,
         severity: Optional[app_commands.Choice[str]] = None,
         post_summary: bool = False,
+        profile: Optional[str] = None,
+        date: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
         target_channel = channel
@@ -1968,8 +2270,28 @@ def register_commands(
             )
             return
 
-        analysis_input = resolve_analysis_path() or default_analysis_path()
-        findings_output = ensure_parent(default_findings_path())
+        context_result = context_factory(profile=profile, date=date, stage="p2")
+        analysis_input, analysis_reason = resolve_latest_partition(
+            context_result.context,
+            "p2",
+            fallback_to_legacy=True,
+            legacy_candidates=P2_ANALYSIS_CANDIDATES,
+        )
+        fallback_reason = _merge_fallback_reason(
+            context_result.fallback_reason,
+            analysis_reason,
+        )
+        context_notice = _format_context_notice(context_result.context, fallback_reason)
+        if not analysis_input.exists():
+            await interaction.followup.send(
+                "解析データが見つかりません。Day2 の処理を先に実行してください。\n"
+                + context_notice,
+                ephemeral=True,
+            )
+            return
+
+        findings_output = context_result.paths.stage_file("p3", ensure_parent=True)
+        metrics_path = context_result.paths.metrics_path("p3", ensure_parent=True)
 
         try:
             summary = await asyncio.to_thread(
@@ -1984,9 +2306,14 @@ def register_commands(
                 time_range=resolved_range,
                 default_end_offset=default_end_offset,
                 policy=policy,
+                metrics_path=metrics_path,
             )
         except FileNotFoundError:
-            await interaction.followup.send("解析データが見つかりません。Day2 の処理を先に実行してください。", ephemeral=True)
+            await interaction.followup.send(
+                "解析データが見つかりません。Day2 の処理を先に実行してください。\n"
+                + context_notice,
+                ephemeral=True,
+            )
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("scan failed")
@@ -2001,8 +2328,10 @@ def register_commands(
             severity_value,
             interaction.user,
             time_range=resolved_range,
+            context=context_result.context,
+            fallback_reason=fallback_reason,
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(content=context_notice, embed=embed, ephemeral=True)
 
         if post_summary and settings.log_channel_id:
             log_channel = client.get_channel(settings.log_channel_id)
@@ -2012,7 +2341,7 @@ def register_commands(
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("post summary failed")
                     return
-            await log_channel.send(embed=embed)
+            await log_channel.send(content=context_notice, embed=embed)
 
     @tree.command(name="report", description="モデレーションレポートを生成", guild=guild)
     @app_commands.guild_only()
@@ -2022,6 +2351,8 @@ def register_commands(
         until="終了日（未指定は現在時刻）",
         severity="対象とする深刻度（未指定は警告＝緑以外）",
         format="出力形式",
+        profile=profile_desc,
+        date=date_desc,
     )
     @app_commands.choices(
         severity=[
@@ -2045,6 +2376,8 @@ def register_commands(
         until: Optional[str] = None,
         severity: Optional[app_commands.Choice[str]] = None,
         format: Optional[app_commands.Choice[str]] = None,
+        profile: Optional[str] = None,
+        date: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
         target_channel = channel
@@ -2061,9 +2394,23 @@ def register_commands(
         default_end_offset = timedelta()
         resolved_range = resolve_time_range(since, until, default_end_offset=default_end_offset)
 
-        findings_path = resolve_findings_path()
-        if findings_path is None or not findings_path.exists():
-            await interaction.followup.send("検知データが見つかりません。先に /scan を実行してください。", ephemeral=True)
+        context_result = context_factory(profile=profile, date=date, stage="p3")
+        findings_path, findings_reason = resolve_latest_partition(
+            context_result.context,
+            "p3",
+            fallback_to_legacy=True,
+            legacy_candidates=P3_FINDINGS_CANDIDATES,
+        )
+        fallback_reason = _merge_fallback_reason(
+            context_result.fallback_reason,
+            findings_reason,
+        )
+        context_notice = _format_context_notice(context_result.context, fallback_reason)
+        if not findings_path.exists():
+            await interaction.followup.send(
+                "検知データが見つかりません。先に /scan を実行してください。\n" + context_notice,
+                ephemeral=True,
+            )
             return
 
         try:
@@ -2077,29 +2424,45 @@ def register_commands(
                 default_end_offset=default_end_offset,
             )
         except FileNotFoundError:
-            await interaction.followup.send("検知データが見つかりません。先に /scan を実行してください。", ephemeral=True)
+            await interaction.followup.send(
+                "検知データが見つかりません。先に /scan を実行してください。\n" + context_notice,
+                ephemeral=True,
+            )
             return
 
         if not records:
-            await interaction.followup.send("条件に合致する検知はありませんでした。", ephemeral=True)
+            await interaction.followup.send(
+                "条件に合致する検知はありませんでした。\n" + context_notice,
+                ephemeral=True,
+            )
             return
 
         send_embed = format_value in {"embed", "both"}
         send_csv = format_value in {"csv", "both"}
 
         if send_embed:
-            view = ReportPaginator(client, settings, ticket_store, records, interaction.user)
+            view = ReportPaginator(
+                client,
+                settings,
+                ticket_store,
+                records,
+                interaction.user,
+                context_note=context_notice,
+            )
             await view.send_initial(interaction)
 
         if send_csv:
             engine = RuleEngine()
             violence_patterns = engine.groups.get("violence", ())
-            csv_path = ensure_parent(default_report_path())
+            csv_path = context_result.paths.report_path(ensure_parent=True)
             rows = write_report_csv(records, csv_path, violence_patterns)
             with csv_path.open("rb") as fp:
                 severity_display = _severity_option_label(severity_value)
                 await interaction.followup.send(
-                    content=f"CSV を作成しました（{rows} 行、対象深刻度={severity_display}）。",
+                    content=(
+                        f"CSV を作成しました（{rows} 行、対象深刻度={severity_display}）。\n"
+                        + context_notice
+                    ),
                     file=discord.File(fp=fp, filename=csv_path.name),
                     ephemeral=True,
                 )
@@ -2112,15 +2475,36 @@ def register_commands(
         if not active_tickets:
             await interaction.followup.send("通知待ちのチケットはありません。", ephemeral=True)
             return
-        record_index = load_findings_index()
         entries: list[TicketEntry] = []
         for ticket in active_tickets:
-            record = record_index.get((ticket.channel_id, ticket.message_id))
-            if record is None:
-                record = find_record_for_message(ticket.channel_id, ticket.message_id)
-            record_data = _ensure_record_defaults(record, ticket, None)
-            entries.append(TicketEntry(ticket=ticket, record=record_data))
-        view = TicketPaginator(client, settings, ticket_store, entries, interaction.user)
+            context_result = _ticket_context_result(context_factory, ticket)
+            match = find_record_for_message(
+                ticket.channel_id,
+                ticket.message_id,
+                context_result=context_result,
+            )
+            base_record = match.record if match else None
+            record_data = _ensure_record_defaults(base_record, ticket, None)
+            entry_context = match.context if match else context_result.context
+            fallback_reason = match.fallback_reason if match else context_result.fallback_reason
+            if fallback_reason and not record_data.get("fallback_reason"):
+                record_data["fallback_reason"] = fallback_reason
+            entries.append(
+                TicketEntry(
+                    ticket=ticket,
+                    record=record_data,
+                    context=entry_context,
+                    fallback_reason=fallback_reason,
+                )
+            )
+        view = TicketPaginator(
+            client,
+            settings,
+            ticket_store,
+            entries,
+            interaction.user,
+            context_factory=context_factory,
+        )
         await view.send_initial(interaction)
 
     watcher_task: asyncio.Task | None = None
@@ -2130,14 +2514,29 @@ def register_commands(
         nonlocal watcher_task
         await ticket_store.connect()
         if watcher_task is None:
-            watcher_task = client.loop.create_task(ticket_watcher(client, settings, ticket_store))
+            watcher_task = client.loop.create_task(
+                ticket_watcher(
+                    client,
+                    settings,
+                    ticket_store,
+                    context_factory=context_factory,
+                )
+            )
 
 
 def main() -> None:
     settings = get_settings()
     client, tree = create_client()
     ticket_store = TicketStore(settings.ticket_db_path)
-    register_commands(client, tree, settings, ticket_store)
+    base_context, context_factory = create_context_factory(settings)
+    register_commands(
+        client,
+        tree,
+        settings,
+        ticket_store,
+        base_context=base_context,
+        context_factory=context_factory,
+    )
 
     logger.info("starting bot")
     client.run(settings.discord_bot_token)

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Iterator, Literal, TYPE_CHECKING
+from typing import Iterable, Iterator, Literal, TYPE_CHECKING, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
@@ -253,6 +253,66 @@ class PartitionPaths:
         return path
 
 
+@dataclass(slots=True)
+class ContextPaths:
+    """Cached path helpers derived from a profile context."""
+
+    context: ProfileContext
+    partition_paths: PartitionPaths
+    _stage_cache: dict[StageName, Path] = field(default_factory=dict)
+
+    def stage_file(self, stage: StageName, *, ensure_parent: bool = False) -> Path:
+        if ensure_parent:
+            return self.partition_paths.stage_file(stage, ensure_parent=True)
+        cached = self._stage_cache.get(stage)
+        if cached is not None:
+            return cached
+        path = self.partition_paths.stage_file(stage, ensure_parent=False)
+        self._stage_cache[stage] = path
+        return path
+
+    def report_path(self, *, ensure_parent: bool = False) -> Path:
+        return self.partition_paths.report_path(ensure_parent=ensure_parent)
+
+    def metrics_path(self, stage: str, *, ensure_parent: bool = False) -> Path:
+        return self.partition_paths.metrics_file(stage, ensure_parent=ensure_parent)
+
+    @classmethod
+    def for_context(cls, context: ProfileContext) -> ContextPaths:
+        return _cached_context_paths(context)
+
+
+_CONTEXT_PATHS_CACHE: dict[Tuple[str, str, str], ContextPaths] = {}
+
+
+def _context_cache_key(context: ProfileContext) -> Tuple[str, str, str]:
+    tz = getattr(context.tzinfo, "key", str(context.tzinfo))
+    return context.profile, context.iso_date, tz
+
+
+def _cached_context_paths(context: ProfileContext) -> ContextPaths:
+    key = _context_cache_key(context)
+    cached = _CONTEXT_PATHS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    paths = ContextPaths(context=context, partition_paths=PartitionPaths(context))
+    _CONTEXT_PATHS_CACHE[key] = paths
+    return paths
+
+
+@dataclass(slots=True)
+class ContextResolveResult:
+    """Outcome of resolving a context for command execution."""
+
+    context: ProfileContext
+    paths: ContextPaths
+    fallback_reason: Optional[str] = None
+
+    @property
+    def iso_date(self) -> str:
+        return self.context.iso_date
+
+
 def _extract_partition_date(path: Path, *, stage: StageName) -> date | None:
     cfg = _STAGE_FILE_TEMPLATES[stage]
     prefix = str(cfg["prefix"])
@@ -301,14 +361,68 @@ def iter_partitions(
         yield value
 
 
+def latest_partition_date(
+    profile: str,
+    stage: StageName,
+    *,
+    root: Path = PROFILES_ROOT,
+) -> Optional[date]:
+    items = list_partitions(profile, stage, limit=1, root=root)
+    return items[0] if items else None
+
+
+def resolve_latest_partition(
+    context: ProfileContext,
+    stage: StageName,
+    *,
+    fallback_to_legacy: bool = True,
+    legacy_candidates: Iterable[Path] | None = None,
+) -> tuple[Path, Optional[str]]:
+    paths = ContextPaths.for_context(context)
+    stage_path = paths.stage_file(stage, ensure_parent=False)
+    fallback_reason: Optional[str] = None
+    if stage_path.exists():
+        return stage_path, fallback_reason
+    legacy_paths = list(legacy_candidates or ()) if fallback_to_legacy else []
+    for candidate in legacy_paths:
+        if candidate.exists():
+            fallback_reason = "fallback=legacy"
+            return candidate, fallback_reason
+    fallback_reason = fallback_reason or "fallback=missing"
+    return stage_path, fallback_reason
+
+
+def iter_recent_findings(
+    context: ProfileContext,
+    *,
+    days_back: int = 7,
+    stage: StageName = "p3",
+    root: Path = PROFILES_ROOT,
+) -> Iterator[tuple[date, Path]]:
+    for partition_date in list_partitions(
+        context.profile,
+        stage,
+        limit=days_back,
+        root=root,
+    ):
+        date_token = partition_date.isoformat()
+        partition_context = context.with_date(date_token=date_token)
+        yield partition_date, PartitionPaths(partition_context).stage_file(stage)
+
+
 __all__ = [
     "DEFAULT_PROFILE",
     "LEGACY_PROFILE",
     "PROFILES_ROOT",
+    "ContextPaths",
+    "ContextResolveResult",
     "PartitionPaths",
     "ProfileContext",
     "ProfileError",
     "StageName",
+    "iter_recent_findings",
     "iter_partitions",
+    "latest_partition_date",
     "list_partitions",
+    "resolve_latest_partition",
 ]
