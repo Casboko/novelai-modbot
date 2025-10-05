@@ -4,17 +4,17 @@
 本リポジトリは Discord サーバー向けモデレーション bot の処理パイプラインを Python で実装しています。主要なモジュールは `app/` 以下にまとまり、`main.py` が Discord クライアントとルールエンジンを起動します。`p0_scan.py` → `cli_wd14.py` → `analysis_merge.py` → `triage.py` の順で添付画像取得から検知レポート生成までを担当します。
 - `configs/` にはルール定義 `rules.yaml` や NudeNet/交差シグナル構成があり、運用パラメータ調整の際に編集します。
 - `models/wd14/` は WD14 EVA02 重みとラベル情報のキャッシュ置き場です。初回推論時に自動的にダウンロードされ、差し替えはリビジョン指定で制御します。
-- `out/` はスキャン結果や生成 CSV を置くためのワークスペースで、各フェーズごとの中間成果物を確認できます。
+- `out/profiles/<profile>/` が各フェーズ（p0〜p3）の成果物を保持する標準ワークスペースです。`current` プロファイルが即応運用、`legacy` が過去アーカイブ用として利用されます。
 - `docs/` とルート直下の P0/P1/P2 文書は運用手順の補足資料であり、作業スケジュールやエスカレーションの参考になります。
 - 依存は `requirements.base.txt`（共通）と `requirements-cpu.txt` / `requirements-gpu.txt`（いずれか片方を使用）に分離されています。`requirements.txt` は CPU プロファイルを指し、`app/cache_*.sqlite` が推論キャッシュです。削除すると再推論が走ります。
 
 ## ビルド・テスト・開発コマンド
-- `python -m app.p0_scan --since 2024-01-01 --out out/p0_scan.csv` : Discord から添付ファイルを収集し CSV を蓄積します (`.env` のトークン必須)。
-- `python -m app.cli_wd14 --input out/p0_scan.csv` : WD14 推論を実行し JSONL とメトリクスを出力します (ローカルモデルは自動取得)。
-- `python -m app.analysis_merge --scan out/p0_scan.csv --wd14 out/p1_wd14.jsonl --metrics out/p2_metrics.json` : WD14 と NudeNet の結果を統合して解析 JSONL を生成します。
-- `python -m app.cli_scan --analysis out/p2_analysis.jsonl --findings out/p3_findings.jsonl` : ルール評価を行いサマリーを表示します。
-- `python -m app.cli_report --findings out/p3_findings.jsonl --severity red` : CSV レポートを作成し、重大度フィルタ付きでエクスポートします。
-- `python -m app.cli_report --help` や `python -m app.cli_scan --help` を実行し、追加オプションやチャンネルフィルタを確認してください。
+- `python -m app.p0_scan --profile current --date 2025-10-01` : Discord から添付ファイルを収集し、`out/profiles/current/p0/p0_2025-10-01.csv` を生成します (`.env` のトークン必須)。
+- `python -m app.cli_wd14 --profile current --date 2025-10-01` : WD14 推論を実行し、同日の p1 JSONL/メトリクスを自動出力します。
+- `python -m app.analysis_merge --profile current --date 2025-10-01` : WD14 と NudeNet の結果を統合し、`p2/p2_YYYY-MM-DD.jsonl` に解析結果を保存します。
+- `python -m app.cli_scan --profile current --date 2025-10-01` : 解析結果をルール評価し、`p3/findings_YYYY-MM-DD.jsonl` とメトリクスを生成します。
+- `python -m app.cli_report --profile current --date 2025-10-01 --severity red` : 指定日の findings から CSV レポートを出力します。
+- `python -m app.cli_report --help` や `python -m app.cli_scan --help` で、`--analysis-pattern` や `--analysis-limit-days` などのパーティション向けオプションを確認してください。
 - NSFW 辞書は `configs/rules.yaml` の `groups.nsfw_general` を唯一の編集箇所とし、更新後は **p1（必要な場合）→p2→p3** の順に再実行して反映を確認してください。
 
 ## GPU 実行クイックスタート（WD14）
@@ -23,20 +23,20 @@
   - GPU 環境 (CUDA/TensorRT): `pip install -r requirements-gpu.txt`
 - 実行前に `python -c "import onnxruntime as ort; print(ort.get_available_providers())"` で `CUDAExecutionProvider` や `TensorrtExecutionProvider` が列挙されることを確認してください。
 - GPU 実行例:
-  `python -m app.cli_wd14 --input out/p0/shard_00.csv --out out/p1/p1_wd14_00.jsonl --metrics out/metrics/p1_00.json --provider cuda --batch-size 48 --concurrency 24 --qps 4.0`
+  `python -m app.cli_wd14 --profile current --date 2025-10-01 --provider cuda --batch-size 48 --concurrency 24 --qps 4.0`
 - `WD14_PROVIDER`（既定 `cpu`）で CLI 未指定時のプロバイダを切り替えられます。環境に CUDA/TensorRT が存在しない場合は WARN を 1 度だけ出して自動的に CPU へフォールバックします。
-- メトリクス JSON (`--metrics`) には `infer_ms_avg` と `img_per_sec` が追加されており、CPU/GPU の性能比較に利用できます。必要に応じて `.env` の `WD14_CACHE_SUFFIX` を設定すると WD14 キャッシュファイルを分岐できます。
+- メトリクス JSON (`--metrics`) には `infer_ms_avg` と `img_per_sec` が追加されており、CPU/GPU の性能比較に利用できます。プロファイルが `legacy` の場合はキャッシュ DB が自動的に分岐されます（必要に応じて `WD14_CACHE_SUFFIX` で明示切替も可能）。
 
 ## シャーディング実行フロー（20,000枚規模）
-1. **分割**: `python scripts/split_index.py --input out/p0_scan.csv --out-dir out/p0 --shards 10`
+1. **分割**: `python scripts/split_index.py --profile current --date 2025-10-01 --shards 10`
 2. **p1 (WD14)**:
    ```bash
    python scripts/run_p1_sharded.py \
-     --shard-glob "out/p0/shard_*.csv" \
-     --out-dir out \
+     --profile current \
+     --date 2025-10-01 \
+     --shard-glob "out/profiles/current/p0/shards/shard_*.csv" \
      --provider cuda --batch-size 48 --concurrency 24 --qps 4.0 \
-     --parallel 2 --resume \
-     --status-file out/status/p1_manifest.json
+     --parallel 2 --resume
    ```
    - `.tmp` ファイルは完了時に自動 rename（失敗時は残置）。
    - `--resume` を付けると既存の最終ファイルをスキップし、途中停止後の再開が可能です。
@@ -44,15 +44,14 @@
 3. **p2 (analysis merge)**:
    ```bash
    python scripts/run_p2_sharded.py \
-     --shard-glob "out/p0/shard_*.csv" \
-     --wd14-dir out/p1 \
-     --out-dir out \
+     --profile current \
+     --date 2025-10-01 \
+     --shard-glob "out/profiles/current/p0/shards/shard_*.csv" \
      --qps 4.0 --concurrency 16 \
      --parallel 2 --resume \
-     --status-file out/status/p2_manifest.json \
      --extra-args "--nudenet-mode auto"
    ```
-   - ランナーは `--rules-config configs/rules.yaml` を自動付与します。別の辞書を使う場合は `--extra-args` で明示してください。
+   - ランナーは `--rules-config configs/rules_v2.yaml` を自動付与します。別の辞書を使う場合は `--extra-args` で明示してください。
 4. **マージ（任意）**:
    ```bash
    python scripts/merge_jsonl.py --glob "out/p1/p1_wd14_*.jsonl" --out out/p1/p1_wd14_all.jsonl
@@ -133,6 +132,11 @@ Python 3.11 を想定し、PEP 8 準拠の 4 スペースインデントを徹�
    ```
 3. `p3_ab_compare.json` で counts/delta/混同行列、`p3_ab_diff.csv` で差分列、`p3_ab_diff_samples.jsonl` でレビュー用サンプルを確認
 4. 差分レビュー後、合意したルールを `configs/rules.yaml` に昇格
+
+## プロファイル運用ツール
+- `scripts/profile_rotate.py --profile current --retention-days 14 --dry-run` : 保持期間を超えたパーティションを `legacy` へローテーションします（`--dry-run` で内容確認、`--force` で上書き）。
+- `scripts/cache_clone.py --profile legacy` : 共有キャッシュをプロファイル専用 DB に複製します。
+- `scripts/migrate_out_to_profiles.py --profile legacy --dry-run` : 旧 `out/` 配下の成果物を新しいプロファイル構成へ移行します。
 
 ## strict / warn モード
 - `warn`（既定）: 未知識別子や式エラーは 0/False にフォールバックし WARN を 1ルール×エラー種あたり最大5回表示

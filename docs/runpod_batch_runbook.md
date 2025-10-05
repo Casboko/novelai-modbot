@@ -81,6 +81,8 @@ aws s3 sync s3://$RUNPOD_VOLUME_ID/out ./out \
 MODELS_DIR=/workspace/models
 CACHE_DIR=/workspace/cache
 OUT_DIR=/workspace/out
+MODBOT_PROFILE=current
+MODBOT_TZ=UTC
 
 WD14_PROVIDER=cuda
 WD14_BATCH=48
@@ -120,29 +122,30 @@ python scripts/split_index.py \
 
 ```bash
 python scripts/run_p1_sharded.py \
-  --shard-glob "out/p0/shard_*.csv" \
-  --out-dir out \
+  --profile current \
+  --date 2025-10-01 \
+  --shard-glob "out/profiles/current/p0/shards/shard_*.csv" \
   --provider cuda \
   --batch-size ${WD14_BATCH:-48} \
   --concurrency ${ANALYSIS_CONCURRENCY:-24} \
   --qps ${ANALYSIS_QPS:-4.0} \
   --parallel 2 \
   --resume \
-  --status-file out/status/p1_manifest.json
+  --status-file out/profiles/current/status/p1_manifest_current.json
 ```
 
 ### 4.3 p2（統合 / NudeNet ゲート）
 
 ```bash
 python scripts/run_p2_sharded.py \
-  --shard-glob "out/p0/shard_*.csv" \
-  --wd14-dir out/p1 \
-  --out-dir out \
+  --profile current \
+  --date 2025-10-01 \
+  --shard-glob "out/profiles/current/p0/shards/shard_*.csv" \
   --qps ${ANALYSIS_QPS:-4.0} \
   --concurrency 16 \
   --parallel 2 \
   --resume \
-  --status-file out/status/p2_manifest.json \
+  --status-file out/profiles/current/status/p2_manifest_current.json \
   --extra-args "--nudenet-mode auto"
 ```
 
@@ -153,36 +156,38 @@ python scripts/run_p2_sharded.py \
 ```bash
 # 本番
 python -m app.cli_scan \
-  --analysis out/p2/p2_analysis_all.jsonl \
-  --findings out/p3/p3_decision_all.jsonl \
+  --profile current \
+  --date 2025-10-01 \
   --rules configs/rules.yaml \
-  --metrics out/metrics/p3_run.json \
+  --metrics out/profiles/current/metrics/p3/p3_metrics_2025-10-01.json \
   --since 1970-01-01 --until 2099-12-31
 
 レガシー構成（`version: 1`）を一時的に続行する場合は `--allow-legacy --fallback green` を付与してください。結果は強制的に `severity=green` となり、CSV 契約は保たれます（書き込みを抑止したい場合は `--fallback skip`）。
 
 # 追加トレースを出力（必要なときだけ）
 python -m app.cli_scan \
-  --analysis out/p2/p2_analysis_all.jsonl \
-  --findings out/p3/p3_decision_all.jsonl \
+  --profile current \
+  --date 2025-10-01 \
   --rules configs/rules.yaml \
-  --metrics out/metrics/p3_run.json \
-  --trace-jsonl out/metrics/p3_trace.jsonl
+  --metrics out/profiles/current/metrics/p3/p3_metrics_2025-10-01.json \
+  --trace-jsonl out/profiles/current/metrics/p3/p3_trace_2025-10-01.jsonl
 
 # ドライランで件数・速度確認
 python -m app.cli_scan \
-  --analysis out/p2/p2_analysis_all.jsonl \
+  --profile current \
+  --date 2025-10-01 \
   --rules configs/rules.yaml \
-  --metrics out/metrics/p3_dry.json \
+  --metrics out/profiles/current/metrics/p3/p3_dry_2025-10-01.json \
   --dry-run --limit 256 \
   --since 1970-01-01 --until 2099-12-31
 
 # A/B 比較（採用前の検証）
 python -m app.cli_rules_ab \
-  --analysis out/p2/p2_analysis_all.jsonl \
+  --profile current \
+  --date 2025-10-01 \
   --rulesA configs/rules.yaml \
   --rulesB configs/rules_candidate.yaml \
-  --out-dir out/exports \
+  --out-dir out/profiles/current/metrics/ab \
   --sample-diff 200 \
   --samples-minimal \
   --samples-redact-urls

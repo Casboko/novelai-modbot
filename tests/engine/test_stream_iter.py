@@ -23,3 +23,13 @@ def test_iter_jsonl_limit_offset(tmp_path: Path) -> None:
 
     records = list(iter_jsonl(file_a, limit=2, offset=1))
     assert [record["id"] for record in records] == [1, 2]
+
+
+def test_iter_jsonl_reverse_sort(tmp_path: Path) -> None:
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    first.write_text(json.dumps({"id": "first"}) + "\n", encoding="utf-8")
+    second.write_text(json.dumps({"id": "second"}) + "\n", encoding="utf-8")
+
+    records = list(iter_jsonl(tmp_path, sort="reverse-name"))
+    assert [record["id"] for record in records] == ["second", "first"]
