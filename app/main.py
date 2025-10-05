@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import logging
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from .profiles import (
     ContextResolveResult,
     ProfileContext,
     StageName,
+    iter_recent_findings,
     latest_partition_date,
     resolve_latest_partition,
 )
