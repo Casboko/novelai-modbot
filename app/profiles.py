@@ -70,13 +70,25 @@ def _normalize_profile(value: str | None) -> str:
     return normalized if normalized else DEFAULT_PROFILE
 
 
+def _sanitize_timezone(name: str | None) -> str | None:
+    if name is None:
+        return None
+    candidate = name.strip()
+    if not candidate:
+        return None
+    if candidate.startswith("<") and candidate.endswith(">"):
+        return None
+    return candidate
+
+
 def _timezone_from_name(name: str | None) -> ZoneInfo | UTC:
-    if not name:
+    normalized = _sanitize_timezone(name)
+    if not normalized:
         return UTC
     try:
-        return ZoneInfo(name)
+        return ZoneInfo(normalized)
     except Exception as exc:  # noqa: BLE001
-        raise ProfileError(f"invalid timezone: {name}") from exc
+        raise ProfileError(f"invalid timezone: {normalized}") from exc
 
 
 def _resolve_date(date_token: str | None, tzinfo: ZoneInfo | UTC) -> date:
@@ -111,9 +123,11 @@ class ProfileContext:
         default_timezone: str | None = None,
     ) -> "ProfileContext":
         profile_env = os.getenv("MODBOT_PROFILE")
-        tz_env = os.getenv("MODBOT_TZ") or default_timezone
+        tz_env = _sanitize_timezone(os.getenv("MODBOT_TZ"))
+        tz_fallback = _sanitize_timezone(default_timezone)
+        tz_name = tz_env or tz_fallback
         profile = _normalize_profile(profile_env or default_profile)
-        tzinfo = _timezone_from_name(tz_env)
+        tzinfo = _timezone_from_name(tz_name)
         date_value = _resolve_date(date_token or os.getenv("MODBOT_PARTITION_DATE"), tzinfo)
         return cls(profile=profile, date=date_value, tzinfo=tzinfo)
 
@@ -125,11 +139,15 @@ class ProfileContext:
         *,
         default_profile: str | None = None,
         timezone_hint: str | None = None,
+        default_timezone: str | None = None,
     ) -> "ProfileContext":
         profile = _normalize_profile(profile_arg) if profile_arg else None
         env_profile = os.getenv("MODBOT_PROFILE")
         final_profile = _normalize_profile(profile or env_profile or default_profile)
-        tz_name = os.getenv("MODBOT_TZ") or timezone_hint
+        tz_env = _sanitize_timezone(os.getenv("MODBOT_TZ"))
+        tz_hint = _sanitize_timezone(timezone_hint)
+        tz_default = _sanitize_timezone(default_timezone)
+        tz_name = tz_env or tz_hint or tz_default
         tzinfo = _timezone_from_name(tz_name)
         date_value = _resolve_date(date_arg, tzinfo)
         return cls(profile=final_profile, date=date_value, tzinfo=tzinfo)
@@ -149,6 +167,7 @@ class ProfileContext:
             date_arg=date_arg,
             default_profile=default_profile,
             timezone_hint=timezone_hint,
+            default_timezone=settings.timezone,
         )
 
     @property
@@ -273,6 +292,9 @@ class ContextPaths:
 
     def report_path(self, *, ensure_parent: bool = False) -> Path:
         return self.partition_paths.report_path(ensure_parent=ensure_parent)
+
+    def report_ext_path(self, *, ensure_parent: bool = False) -> Path:
+        return self.partition_paths.report_ext_path(ensure_parent=ensure_parent)
 
     def metrics_path(self, stage: str, *, ensure_parent: bool = False) -> Path:
         return self.partition_paths.metrics_file(stage, ensure_parent=ensure_parent)

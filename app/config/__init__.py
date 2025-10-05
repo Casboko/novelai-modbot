@@ -47,6 +47,7 @@ class Settings(BaseSettings):
             date_arg=date,
             default_profile=self.profile_default,
             timezone_hint=timezone_hint,
+            default_timezone=self.timezone,
         )
 
 

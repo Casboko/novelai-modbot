@@ -19,6 +19,7 @@ from .io.stream import iter_jsonl
 from .output_paths import (
     P2_ANALYSIS_CANDIDATES,
     P3_FINDINGS_CANDIDATES,
+    P3_REPORT_CANDIDATES,
 )
 from .p3_stream import FindingsWriter, evaluate_stream, _build_contract_payload
 from .rule_engine import EvaluationResult, RuleEngine
@@ -26,6 +27,15 @@ from .triage_attachments import P0Index
 from .jsonl_merge import merge_jsonl_records
 from .profiles import ContextResolveResult, ProfileContext, ContextPaths
 
+
+# Legacy fallback paths for backward compatibility
+LEGACY_ANALYSIS_PATH = P2_ANALYSIS_CANDIDATES[0]
+LEGACY_FINDINGS_PATH = P3_FINDINGS_CANDIDATES[0]
+LEGACY_REPORT_PATH = P3_REPORT_CANDIDATES[0]
+
+# Backwards compatible defaults for legacy callers and tests.
+FINDINGS_PATH = LEGACY_FINDINGS_PATH
+REPORT_PATH = LEGACY_REPORT_PATH
 
 # CSV 列順の契約。順序変更は CLI/テストで検知する。
 P3_CSV_HEADER: tuple[str, ...] = (
@@ -91,8 +101,8 @@ class AttachmentStats:
 
 
 def run_scan(
-    analysis_path: Path | str | None = None,
-    findings_path: Path | str | None = None,
+    analysis_path: Path | str | None = LEGACY_ANALYSIS_PATH,
+    findings_path: Path | str | None = LEGACY_FINDINGS_PATH,
     rules_path: Path | str = Path("configs/rules_v2.yaml"),
     channel_ids: Optional[Sequence[str]] = None,
     since: Optional[str] = None,

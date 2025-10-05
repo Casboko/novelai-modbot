@@ -56,12 +56,22 @@ def main() -> None:
     raise SystemExit(code)
 
 
+def _context_payload(context_result: ContextResolveResult | None) -> dict[str, Any] | None:
+    if context_result is None:
+        return None
+    return {
+        "profile": context_result.context.profile,
+        "date": context_result.context.iso_date,
+        "fallback_reason": context_result.fallback_reason,
+    }
+
+
 def _cmd_check_findings(
     path: Path,
     schema_path: Path,
     limit: int,
     json_output: bool,
-    context_result: ContextResolveResult,
+    context_result: ContextResolveResult | None = None,
 ) -> int:
     try:
         schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -121,17 +131,16 @@ def _cmd_check_findings(
         _print_error(f"failed to read findings: {path}: {exc}")
         return 1
 
+    context_info = _context_payload(context_result)
+
     if json_output:
         output = {
             "ok": not reported,
             "checked": checked,
             "errors": reported,
-            "context": {
-                "profile": context_result.context.profile,
-                "date": context_result.context.iso_date,
-                "fallback_reason": context_result.fallback_reason,
-            },
         }
+        if context_info is not None:
+            output["context"] = context_info
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         print(f"checked={checked}")
@@ -141,15 +150,22 @@ def _cmd_check_findings(
                     f"[line {item['line']}] {item['error']} (path={item['path']}, type={item['type']})"
                 )
         else:
-            context_notice = f"profile={context_result.context.profile}, date={context_result.context.iso_date}"
-            if context_result.fallback_reason:
-                context_notice += f", fallback={context_result.fallback_reason}"
-            print(f"findings schema: ok ({context_notice})")
+            if context_info is not None:
+                context_notice = f"profile={context_info['profile']}, date={context_info['date']}"
+                if context_info.get("fallback_reason"):
+                    context_notice += f", fallback={context_info['fallback_reason']}"
+                print(f"findings schema: ok ({context_notice})")
+            else:
+                print("findings schema: ok")
 
     return 0 if not reported else 2
 
 
-def _cmd_check_report(path: Path, json_output: bool, context_result: ContextResolveResult) -> int:
+def _cmd_check_report(
+    path: Path,
+    json_output: bool,
+    context_result: ContextResolveResult | None = None,
+) -> int:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)
@@ -167,24 +183,26 @@ def _cmd_check_report(path: Path, json_output: bool, context_result: ContextReso
     expected = list(P3_CSV_HEADER)
     ok = header == expected
 
+    context_info = _context_payload(context_result)
+
     if json_output:
         output = {
             "ok": ok,
             "expected": expected,
             "actual": header,
-            "context": {
-                "profile": context_result.context.profile,
-                "date": context_result.context.iso_date,
-                "fallback_reason": context_result.fallback_reason,
-            },
         }
+        if context_info is not None:
+            output["context"] = context_info
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         if ok:
-            context_notice = f"profile={context_result.context.profile}, date={context_result.context.iso_date}"
-            if context_result.fallback_reason:
-                context_notice += f", fallback={context_result.fallback_reason}"
-            print(f"report header: ok ({context_notice})")
+            if context_info is not None:
+                context_notice = f"profile={context_info['profile']}, date={context_info['date']}"
+                if context_info.get("fallback_reason"):
+                    context_notice += f", fallback={context_info['fallback_reason']}"
+                print(f"report header: ok ({context_notice})")
+            else:
+                print("report header: ok")
         else:
             print("report header mismatch")
             print(f" expected: {', '.join(expected)}")
