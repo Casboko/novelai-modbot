@@ -247,9 +247,13 @@ def load_wd14(paths: Sequence[Path], limit: int = 0) -> dict[str, dict]:
             phash = payload.get("phash")
             if not phash:
                 continue
-            data[phash] = payload
+            key = str(phash)
+            if key in data:
+                data[key] = payload
+                continue
             if limit and len(data) >= limit:
-                return data
+                continue
+            data[key] = payload
     return data
 
 
