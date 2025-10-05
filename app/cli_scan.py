@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import get_settings
 from .engine.loader import load_const_overrides_from_path
 from .mode_resolver import has_version_mismatch, resolve_policy
-from .profiles import PartitionPaths
+from .profiles import ContextPaths, ContextResolveResult, PartitionPaths
 from .rule_engine import RuleEngine
 from .triage import run_scan
 
@@ -98,6 +98,10 @@ def main() -> None:
     settings = get_settings()
     context = settings.build_profile_context(profile=args.profile, date=args.date)
     partitions = PartitionPaths(context)
+    context_result = ContextResolveResult(
+        context=context,
+        paths=ContextPaths.for_context(context),
+    )
     if args.analysis is None:
         args.analysis = partitions.stage_file("p2")
     if args.findings is None:
@@ -154,6 +158,7 @@ def main() -> None:
         until=args.until,
         severity_filter=severity,
         dry_run=args.dry_run,
+        context_result=context_result,
         metrics_path=args.metrics,
         trace_jsonl=args.trace_jsonl,
         limit=args.limit,

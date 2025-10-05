@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Literal, Optional, Sequence
 
@@ -16,16 +16,16 @@ from .engine.group_utils import group_top_tags
 from .engine.tag_norm import normalize_pair
 from .engine.types import DslPolicy
 from .io.stream import iter_jsonl
-from .output_paths import default_analysis_path, default_findings_path, default_report_path
+from .output_paths import (
+    P2_ANALYSIS_CANDIDATES,
+    P3_FINDINGS_CANDIDATES,
+)
 from .p3_stream import FindingsWriter, evaluate_stream, _build_contract_payload
 from .rule_engine import EvaluationResult, RuleEngine
 from .triage_attachments import P0Index
 from .jsonl_merge import merge_jsonl_records
+from .profiles import ContextResolveResult, ProfileContext, ContextPaths
 
-
-FINDINGS_PATH = default_findings_path()
-REPORT_PATH = default_report_path()
-ANALYSIS_PATH = default_analysis_path()
 
 # CSV 列順の契約。順序変更は CLI/テストで検知する。
 P3_CSV_HEADER: tuple[str, ...] = (
@@ -61,6 +61,9 @@ class ScanSummary:
     severity_counts: Counter
     output_path: Path
     records: List[dict]
+    context: ProfileContext | None = None
+    fallback_reason: Optional[str] = None
+    attachment_stats: Optional[AttachmentStats] = None
 
     def format_message(self) -> str:
         parts = [f"total={self.total}"]
@@ -88,8 +91,8 @@ class AttachmentStats:
 
 
 def run_scan(
-    analysis_path: Path | str = ANALYSIS_PATH,
-    findings_path: Path | str = FINDINGS_PATH,
+    analysis_path: Path | str | None = None,
+    findings_path: Path | str | None = None,
     rules_path: Path | str = Path("configs/rules_v2.yaml"),
     channel_ids: Optional[Sequence[str]] = None,
     since: Optional[str] = None,
@@ -98,6 +101,8 @@ def run_scan(
     time_range: Optional[tuple[datetime, datetime]] = None,
     default_end_offset: Optional[timedelta] = None,
     *,
+    context_result: ContextResolveResult | None = None,
+    context: ProfileContext | None = None,
     dry_run: bool = False,
     metrics_path: Path | None = None,
     dsl_mode: str | None = None,
@@ -119,8 +124,40 @@ def run_scan(
     `severity` / `rule_id` / `rule_title` / `reasons` / `metrics`
     を含める必要があり、`metrics` はオブジェクト（将来拡張可）として扱う。
     """
-    analysis_path = Path(analysis_path)
-    findings_path = Path(findings_path)
+    if context_result is None and context is not None:
+        context_result = ContextResolveResult(
+            context=context,
+            paths=ContextPaths.for_context(context),
+        )
+
+    paths = context_result.paths if context_result is not None else None
+
+    analysis_path = _resolve_stage_path(
+        analysis_path,
+        stage="p2",
+        context_paths=paths,
+        legacy_candidates=P2_ANALYSIS_CANDIDATES,
+    )
+    findings_path = _resolve_stage_path(
+        findings_path,
+        stage="p3",
+        context_paths=paths,
+        legacy_candidates=P3_FINDINGS_CANDIDATES,
+        ensure_parent=not dry_run,
+    )
+    metrics_path_obj: Optional[Path] = None
+    if metrics_path is not None:
+        metrics_path_obj = Path(metrics_path)
+        metrics_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    elif paths is not None:
+        metrics_path_obj = paths.metrics_path("p3", ensure_parent=True)
+
+    if attachments_report_path is not None:
+        attachments_report_path = Path(attachments_report_path)
+        attachments_report_path.parent.mkdir(parents=True, exist_ok=True)
+    elif include_attachments and paths is not None:
+        attachments_report_path = paths.report_ext_path(ensure_parent=True)
+
     rules_path = Path(rules_path)
 
     effective_policy = policy
@@ -152,8 +189,13 @@ def run_scan(
     attachment_index: Optional[P0Index]
     attachment_stats: AttachmentStats = AttachmentStats()
     attachment_index = None
+    attachment_context = context_result
     if include_attachments:
-        resolved_path = _resolve_p0_scan_path(p0_path)
+        resolved_path = _resolve_p0_scan_path(
+            p0_path,
+            analysis_path=analysis_path,
+            context_result=attachment_context,
+        )
         if resolved_path:
             try:
                 attachment_index = P0Index.from_csv(resolved_path)
@@ -189,8 +231,6 @@ def run_scan(
         return True
 
     collector: List[dict] = []
-    metrics_path = Path(metrics_path) if metrics_path else None
-
     writer_context = nullcontext(None)
     if not dry_run and not merge_existing:
         writer_context = FindingsWriter(findings_path)
@@ -202,7 +242,7 @@ def run_scan(
                 enriched_iter,
                 writer=writer,
                 dry_run=dry_run,
-                metrics_path=metrics_path,
+                metrics_path=metrics_path_obj,
                 record_filter=record_filter,
                 result_filter=result_filter,
                 collector=collector,
@@ -215,8 +255,10 @@ def run_scan(
                 collector,
                 record_filter,
                 result_filter,
-                metrics_path,
+                metrics_path_obj,
                 fallback,
+                context_result=context_result,
+                attachment_stats=attachment_stats,
             )
 
     if merge_existing and not dry_run:
@@ -247,11 +289,21 @@ def run_scan(
     if attachments_report_path and collector:
         _write_attachment_report(collector, attachments_report_path)
 
+    if metrics_path_obj and context_result is not None and not dry_run:
+        _augment_metrics_file(
+            metrics_path_obj,
+            context_result=context_result,
+            attachment_stats=attachment_stats if include_attachments else None,
+        )
+
     return ScanSummary(
         total=report.total,
         severity_counts=report.severity_counts,
         output_path=findings_path,
         records=collector,
+        context=context_result.context if context_result else None,
+        fallback_reason=context_result.fallback_reason if context_result else None,
+        attachment_stats=attachment_stats if include_attachments else None,
     )
 
 
@@ -269,6 +321,9 @@ def _run_legacy_fallback(
     result_filter: ResultFilter | None,
     metrics_path: Path | None,
     fallback: Literal["green", "skip"],
+    *,
+    context_result: ContextResolveResult | None,
+    attachment_stats: AttachmentStats | None,
 ) -> _FallbackReport:
     severity = Counter({"red": 0, "orange": 0, "yellow": 0, "green": 0})
     produced = 0
@@ -322,6 +377,19 @@ def _run_legacy_fallback(
                 "reason": fallback_reason,
             },
         }
+        if context_result is not None:
+            metrics_snapshot["context"] = {
+                "profile": context_result.context.profile,
+                "date": context_result.context.iso_date,
+                "fallback_reason": context_result.fallback_reason,
+            }
+        if attachment_stats is not None and attachment_stats.source_path is not None:
+            metrics_snapshot["attachments"] = {
+                "source_path": str(attachment_stats.source_path),
+                "index_rows": attachment_stats.index_rows,
+                "records_enriched": attachment_stats.records_enriched,
+                "attachments_added": attachment_stats.attachments_added,
+            }
         metrics_path.write_text(json.dumps(metrics_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
     logger.warning(
@@ -332,18 +400,121 @@ def _run_legacy_fallback(
     )
 
     return _FallbackReport(total=produced, severity_counts=severity)
+LEGACY_P0_CANDIDATES: tuple[Path, ...] = (
+    Path("out/p0_scan.csv"),
+    Path("out/out/p0_scan.csv"),
+)
 
 
-def _resolve_p0_scan_path(requested: Path | str | None) -> Optional[Path]:
+def _resolve_p0_scan_path(
+    requested: Path | str | None,
+    *,
+    analysis_path: Path | None,
+    context_result: ContextResolveResult | None,
+) -> Optional[Path]:
     candidates: list[Path] = []
     if requested:
         candidates.append(Path(requested))
-    else:
-        candidates.extend([Path("out/p0_scan.csv"), Path("out/out/p0_scan.csv")])
+    if context_result is not None:
+        candidates.append(context_result.paths.stage_file("p0"))
+    if analysis_path is not None:
+        inferred_date = _extract_partition_date(analysis_path)
+        if inferred_date is not None:
+            if context_result is not None:
+                candidate_context = context_result.context.with_date(date_token=inferred_date.isoformat())
+                candidates.append(ContextPaths.for_context(candidate_context).stage_file("p0"))
+            else:
+                candidate = analysis_path.parent.parent / "p0" / f"p0_{inferred_date.isoformat()}.csv"
+                candidates.append(candidate)
+    candidates.extend(LEGACY_P0_CANDIDATES)
+    seen: set[Path] = set()
     for candidate in candidates:
+        candidate = Path(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         if candidate.exists():
             return candidate
     return None
+
+
+def _resolve_stage_path(
+    provided: Path | str | None,
+    *,
+    stage: str,
+    context_paths: ContextPaths | None,
+    legacy_candidates: Iterable[Path] = (),
+    ensure_parent: bool = False,
+) -> Path:
+    if provided is not None:
+        path = Path(provided)
+    elif context_paths is not None:
+        path = context_paths.stage_file(stage, ensure_parent=ensure_parent)
+        if ensure_parent:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    else:
+        fallback_path: Optional[Path] = None
+        for candidate in legacy_candidates:
+            candidate = Path(candidate)
+            fallback_path = candidate
+            if candidate.exists():
+                break
+        if fallback_path is None:
+            raise FileNotFoundError(f"Unable to resolve default path for stage '{stage}'")
+        path = fallback_path
+    if ensure_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_PARTITION_DATE_RE = re.compile(r"(?:p[0-3]|findings)_(\d{4}-\d{2}-\d{2})")
+
+
+def _extract_partition_date(path: Path) -> Optional[date]:
+    match = _PARTITION_DATE_RE.search(path.name)
+    if match is None:
+        return None
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def _augment_metrics_file(
+    metrics_path: Path,
+    *,
+    context_result: ContextResolveResult,
+    attachment_stats: AttachmentStats | None,
+) -> None:
+    if not metrics_path.exists():
+        return
+    try:
+        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to augment metrics file at %s", metrics_path, exc_info=True)
+        return
+
+    context_payload = payload.setdefault("context", {})
+    context_payload["profile"] = context_result.context.profile
+    context_payload["date"] = context_result.context.iso_date
+    if context_result.fallback_reason:
+        context_payload["fallback_reason"] = context_result.fallback_reason
+
+    if attachment_stats is not None:
+        attachments_payload = payload.setdefault("attachments", {})
+        if attachment_stats.source_path is not None:
+            attachments_payload["source_path"] = str(attachment_stats.source_path)
+        attachments_payload["index_rows"] = attachment_stats.index_rows
+        attachments_payload["records_with_index"] = attachment_stats.records_with_index
+        attachments_payload["records_enriched"] = attachment_stats.records_enriched
+        attachments_payload["attachments_added"] = attachment_stats.attachments_added
+        attachments_payload["degraded_records"] = attachment_stats.degraded_records
+
+    metrics_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _enrich_records_with_attachments(

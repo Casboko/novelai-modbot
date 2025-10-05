@@ -1909,6 +1909,16 @@ class ReportPaginator(RecordPaginatorBase):
                 await interaction.followup.send(f"通知に失敗しました: {exc}", ephemeral=True)
                 return
             await interaction.followup.send(response, ephemeral=True)
+            if record_match.fallback_reason:
+                record.setdefault("fallback_reason", record_match.fallback_reason)
+            self.items[self.index] = TicketEntry(
+                ticket=ticket,
+                record=record,
+                context=record_match.context,
+                fallback_reason=record_match.fallback_reason,
+            )
+            self._current_preview = None
+            await self._refresh_message()
         finally:
             self._set_action_busy("notify", False)
 
@@ -2305,6 +2315,7 @@ def register_commands(
                 severity_filter=severity_filter,
                 time_range=resolved_range,
                 default_end_offset=default_end_offset,
+                context_result=context_result,
                 policy=policy,
                 metrics_path=metrics_path,
             )
