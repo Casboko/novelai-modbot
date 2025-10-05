@@ -39,6 +39,7 @@ class Entry:
 
 
 DEFAULT_CACHE_PATH = Path("app/cache_wd14.sqlite")
+LEGACY_CACHE_PATH = DEFAULT_CACHE_PATH.with_name(f"{DEFAULT_CACHE_PATH.stem}_{LEGACY_PROFILE}{DEFAULT_CACHE_PATH.suffix}")
 DEFAULT_INPUT_PATTERN = "p0_*.csv"
 LOG_LEVEL_CHOICES = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 
@@ -265,8 +266,7 @@ async def run() -> None:
             cache_name = f"{DEFAULT_CACHE_PATH.stem}_{cache_suffix}{DEFAULT_CACHE_PATH.suffix}"
             args.cache = DEFAULT_CACHE_PATH.with_name(cache_name)
         elif context.profile == LEGACY_PROFILE:
-            legacy_name = f"{DEFAULT_CACHE_PATH.stem}_{LEGACY_PROFILE}{DEFAULT_CACHE_PATH.suffix}"
-            args.cache = DEFAULT_CACHE_PATH.with_name(legacy_name)
+            args.cache = LEGACY_CACHE_PATH
         else:
             args.cache = DEFAULT_CACHE_PATH
     elif cache_suffix and args.cache == DEFAULT_CACHE_PATH:

@@ -57,6 +57,9 @@ DEFAULT_EXPOSED_LABELS = {
 DEFAULT_SCAN_PATTERN = "p0_*.csv"
 DEFAULT_WD14_PATTERN = "p1_*.jsonl"
 DEFAULT_NUDENET_CACHE_PATH = Path("app/cache_nudenet.sqlite")
+LEGACY_NUDENET_CACHE_PATH = DEFAULT_NUDENET_CACHE_PATH.with_name(
+    f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{LEGACY_PROFILE}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
+)
 
 
 def _normalize_flag(flag: str) -> str:
@@ -418,8 +421,7 @@ async def async_main() -> None:
             cache_name = f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{cache_suffix}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
             args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH.with_name(cache_name)
         elif context.profile == LEGACY_PROFILE:
-            legacy_name = f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{LEGACY_PROFILE}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
-            args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH.with_name(legacy_name)
+            args.nudenet_cache = LEGACY_NUDENET_CACHE_PATH
         else:
             args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH
     elif cache_suffix and args.nudenet_cache == DEFAULT_NUDENET_CACHE_PATH:
