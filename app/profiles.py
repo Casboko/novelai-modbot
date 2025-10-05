@@ -24,6 +24,23 @@ DEFAULT_PROFILE: str = "current"
 LEGACY_PROFILE: str = "legacy"
 PROFILES_ROOT: Path = Path("out/profiles")
 
+
+_PROFILES_ROOT_OVERRIDE: Path | None = None
+
+
+def set_profiles_root_override(path: Path | None) -> None:
+    """Override the profiles root (testing and tooling support)."""
+
+    global _PROFILES_ROOT_OVERRIDE
+    _PROFILES_ROOT_OVERRIDE = Path(path) if path is not None else None
+    clear_context_cache()
+
+
+def get_profiles_root() -> Path:
+    """Return the active profiles root, considering overrides."""
+
+    return _PROFILES_ROOT_OVERRIDE or PROFILES_ROOT
+
 StageName = Literal["p0", "p1", "p2", "p3"]
 
 
@@ -184,7 +201,7 @@ class PartitionPaths:
     """Resolve partition-specific paths for a profile context."""
 
     context: ProfileContext
-    root: Path = PROFILES_ROOT
+    root: Path = field(default_factory=get_profiles_root)
 
     def profile_root(self, *, ensure: bool = False) -> Path:
         path = self.root / self.context.profile
@@ -307,6 +324,12 @@ class ContextPaths:
 _CONTEXT_PATHS_CACHE: dict[Tuple[str, str, str], ContextPaths] = {}
 
 
+def clear_context_cache() -> None:
+    """Clear cached ContextPaths entries (used when overriding roots)."""
+
+    _CONTEXT_PATHS_CACHE.clear()
+
+
 def _context_cache_key(context: ProfileContext) -> Tuple[str, str, str]:
     tz = getattr(context.tzinfo, "key", str(context.tzinfo))
     return context.profile, context.iso_date, tz
@@ -355,10 +378,11 @@ def list_partitions(
     *,
     limit: int | None = None,
     order: Literal["asc", "desc"] = "desc",
-    root: Path = PROFILES_ROOT,
+    root: Path | None = None,
 ) -> list[date]:
     cfg = _STAGE_FILE_TEMPLATES[stage]
-    directory = root / profile / Path(cfg["dir"])
+    base_root = root or get_profiles_root()
+    directory = base_root / profile / Path(cfg["dir"])
     if not directory.exists():
         return []
     results: list[date] = []
@@ -377,7 +401,7 @@ def iter_partitions(
     stage: StageName,
     *,
     order: Literal["asc", "desc"] = "desc",
-    root: Path = PROFILES_ROOT,
+    root: Path | None = None,
 ) -> Iterator[date]:
     for value in list_partitions(profile, stage, order=order, root=root):
         yield value
@@ -387,7 +411,7 @@ def latest_partition_date(
     profile: str,
     stage: StageName,
     *,
-    root: Path = PROFILES_ROOT,
+    root: Path | None = None,
 ) -> Optional[date]:
     items = list_partitions(profile, stage, limit=1, root=root)
     return items[0] if items else None
@@ -419,25 +443,28 @@ def iter_recent_findings(
     *,
     days_back: int = 7,
     stage: StageName = "p3",
-    root: Path = PROFILES_ROOT,
+    root: Path | None = None,
 ) -> Iterator[tuple[date, Path]]:
+    target_root = root or get_profiles_root()
     for partition_date in list_partitions(
         context.profile,
         stage,
         limit=days_back,
-        root=root,
+        root=target_root,
     ):
         date_token = partition_date.isoformat()
         partition_context = context.with_date(date_token=date_token)
-        yield partition_date, PartitionPaths(partition_context).stage_file(stage)
+        yield partition_date, PartitionPaths(partition_context, root=target_root).stage_file(stage)
 
 
 __all__ = [
     "DEFAULT_PROFILE",
     "LEGACY_PROFILE",
     "PROFILES_ROOT",
+    "clear_context_cache",
     "ContextPaths",
     "ContextResolveResult",
+    "get_profiles_root",
     "PartitionPaths",
     "ProfileContext",
     "ProfileError",
@@ -447,4 +474,5 @@ __all__ = [
     "latest_partition_date",
     "list_partitions",
     "resolve_latest_partition",
+    "set_profiles_root_override",
 ]

@@ -3,11 +3,44 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-import numpy as np
+
+import pytest
+
+
+try:
+    import numpy as np
+except ModuleNotFoundError:  # pragma: no cover - lightweight fallback for CI images
+    class _Array:  # minimal stub to satisfy shape/ndim checks
+        def __init__(self, shape):  # type: ignore[no-untyped-def]
+            if isinstance(shape, int):
+                self._shape = (shape,)
+            else:
+                self._shape = tuple(shape)
+
+        @property
+        def ndim(self) -> int:
+            return len(self._shape)
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            return self._shape
+
+
+    def _zeros(shape, dtype=None):  # type: ignore[no-untyped-def]
+        return _Array(shape)
+
+
+    np = ModuleType("numpy")
+    np.ndarray = _Array  # type: ignore[attr-defined]
+    np.zeros = _zeros  # type: ignore[attr-defined]
+    np.float32 = float  # type: ignore[attr-defined]
+    sys.modules["numpy"] = np
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from app.profiles import clear_context_cache, set_profiles_root_override
 
 
 def _install_onnxruntime_stub() -> None:
@@ -63,3 +96,15 @@ def _install_nudenet_stub() -> None:
 
 _install_onnxruntime_stub()
 _install_nudenet_stub()
+
+
+@pytest.fixture
+def profiles_root_override(tmp_path: Path):
+    """Temporarily redirect profile outputs to a tmp directory."""
+
+    set_profiles_root_override(tmp_path)
+    try:
+        yield tmp_path
+    finally:
+        set_profiles_root_override(None)
+        clear_context_cache()
