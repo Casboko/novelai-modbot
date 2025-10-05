@@ -9,7 +9,8 @@ from typing import Any, Iterable
 
 from jsonschema import Draft7Validator
 
-from .output_paths import default_findings_path, default_report_path
+from .config import get_settings
+from .profiles import ContextPaths, ContextResolveResult, PartitionPaths
 from .triage import P3_CSV_HEADER
 
 
@@ -18,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
 
     findings = sub.add_parser("check-findings", help="Validate findings JSONL against schema")
-    findings.add_argument("--path", type=Path, default=default_findings_path())
+    findings.add_argument("--path", type=Path, help="Findings JSONL path")
     findings.add_argument(
         "--schema",
         type=Path,
@@ -29,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     findings.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
 
     report = sub.add_parser("check-report", help="Validate report CSV header ordering")
-    report.add_argument("--path", type=Path, default=default_report_path())
+    report.add_argument("--path", type=Path, help="Report CSV path")
     report.add_argument("--json", action="store_true", help="Emit machine-readable JSON output")
 
     return parser.parse_args()
@@ -37,16 +38,31 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    settings = get_settings()
+    base_context = settings.build_profile_context()
+    context_result = ContextResolveResult(
+        context=base_context,
+        paths=ContextPaths.for_context(base_context),
+    )
+    partitions = PartitionPaths(base_context)
     if args.command == "check-findings":
-        code = _cmd_check_findings(args.path, args.schema, args.limit, args.json)
+        path = args.path or partitions.stage_file("p3")
+        code = _cmd_check_findings(path, args.schema, args.limit, args.json, context_result)
     elif args.command == "check-report":
-        code = _cmd_check_report(args.path, args.json)
+        path = args.path or partitions.report_path()
+        code = _cmd_check_report(path, args.json, context_result)
     else:  # pragma: no cover - argparse enforces choices
         code = 1
     raise SystemExit(code)
 
 
-def _cmd_check_findings(path: Path, schema_path: Path, limit: int, json_output: bool) -> int:
+def _cmd_check_findings(
+    path: Path,
+    schema_path: Path,
+    limit: int,
+    json_output: bool,
+    context_result: ContextResolveResult,
+) -> int:
     try:
         schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -110,6 +126,11 @@ def _cmd_check_findings(path: Path, schema_path: Path, limit: int, json_output: 
             "ok": not reported,
             "checked": checked,
             "errors": reported,
+            "context": {
+                "profile": context_result.context.profile,
+                "date": context_result.context.iso_date,
+                "fallback_reason": context_result.fallback_reason,
+            },
         }
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
@@ -120,12 +141,15 @@ def _cmd_check_findings(path: Path, schema_path: Path, limit: int, json_output: 
                     f"[line {item['line']}] {item['error']} (path={item['path']}, type={item['type']})"
                 )
         else:
-            print("findings schema: ok")
+            context_notice = f"profile={context_result.context.profile}, date={context_result.context.iso_date}"
+            if context_result.fallback_reason:
+                context_notice += f", fallback={context_result.fallback_reason}"
+            print(f"findings schema: ok ({context_notice})")
 
     return 0 if not reported else 2
 
 
-def _cmd_check_report(path: Path, json_output: bool) -> int:
+def _cmd_check_report(path: Path, json_output: bool, context_result: ContextResolveResult) -> int:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)
@@ -148,11 +172,19 @@ def _cmd_check_report(path: Path, json_output: bool) -> int:
             "ok": ok,
             "expected": expected,
             "actual": header,
+            "context": {
+                "profile": context_result.context.profile,
+                "date": context_result.context.iso_date,
+                "fallback_reason": context_result.fallback_reason,
+            },
         }
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         if ok:
-            print("report header: ok")
+            context_notice = f"profile={context_result.context.profile}, date={context_result.context.iso_date}"
+            if context_result.fallback_reason:
+                context_notice += f", fallback={context_result.fallback_reason}"
+            print(f"report header: ok ({context_notice})")
         else:
             print("report header mismatch")
             print(f" expected: {', '.join(expected)}")

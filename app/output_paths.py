@@ -1,8 +1,14 @@
-"""Output path helpers with profile-aware fallbacks."""
+"""Legacy output path helpers.
+
+These functions are retained for backwards compatibility. New callers should
+prefer :mod:`app.profiles` helpers. Each helper emits a ``DeprecationWarning``
+when used.
+"""
 
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -35,6 +41,20 @@ P3_REPORT_CANDIDATES: tuple[Path, ...] = (
 )
 
 
+_WARNED: set[str] = set()
+
+
+def _warn_deprecated(name: str) -> None:
+    if name in _WARNED:
+        return
+    _WARNED.add(name)
+    warnings.warn(
+        f"output_paths.{name} is deprecated; use app.profiles helpers instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+
 def _resolve_existing(candidates: Sequence[Path]) -> Path | None:
     for path in candidates:
         if path.exists():
@@ -58,6 +78,7 @@ def _context_from_env() -> ProfileContext | None:
 def partition_paths(context: ProfileContext) -> PartitionPaths:
     """Return ``PartitionPaths`` for the provided context."""
 
+    _warn_deprecated("partition_paths")
     return PartitionPaths(context)
 
 
@@ -68,24 +89,28 @@ def default_analysis_path(context: ProfileContext | None = None) -> Path:
     backwards compatibility. New callers should supply a ``ProfileContext``.
     """
 
+    _warn_deprecated("default_analysis_path")
     if context is None:
         return P2_ANALYSIS_CANDIDATES[0]
     return _partition_candidate(context, "p2")
 
 
 def default_findings_path(context: ProfileContext | None = None) -> Path:
+    _warn_deprecated("default_findings_path")
     if context is None:
         return P3_FINDINGS_CANDIDATES[0]
     return _partition_candidate(context, "p3")
 
 
 def default_report_path(context: ProfileContext | None = None) -> Path:
+    _warn_deprecated("default_report_path")
     if context is None:
         return P3_REPORT_CANDIDATES[0]
     return PartitionPaths(context).report_path()
 
 
 def resolve_analysis_path(context: ProfileContext | None = None) -> Path | None:
+    _warn_deprecated("resolve_analysis_path")
     if context is not None:
         candidate = _partition_candidate(context, "p2")
         if candidate.exists():
@@ -100,6 +125,7 @@ def resolve_analysis_path(context: ProfileContext | None = None) -> Path | None:
 
 
 def resolve_findings_path(context: ProfileContext | None = None) -> Path | None:
+    _warn_deprecated("resolve_findings_path")
     if context is not None:
         candidate = _partition_candidate(context, "p3")
         if candidate.exists():
@@ -114,6 +140,7 @@ def resolve_findings_path(context: ProfileContext | None = None) -> Path | None:
 
 
 def resolve_report_path(context: ProfileContext | None = None) -> Path | None:
+    _warn_deprecated("resolve_report_path")
     if context is not None:
         candidate = PartitionPaths(context).report_path()
         if candidate.exists():
@@ -128,11 +155,13 @@ def resolve_report_path(context: ProfileContext | None = None) -> Path | None:
 
 
 def ensure_parent(path: Path) -> Path:
+    _warn_deprecated("ensure_parent")
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def profile_root(profile: str | None = None, *, ensure: bool = False) -> Path:
+    _warn_deprecated("profile_root")
     profile_name = profile or DEFAULT_PROFILE
     path = PROFILES_ROOT / profile_name
     if ensure:
@@ -141,6 +170,7 @@ def profile_root(profile: str | None = None, *, ensure: bool = False) -> Path:
 
 
 def find_existing(paths: Iterable[Path]) -> Path | None:
+    _warn_deprecated("find_existing")
     for path in paths:
         if path.exists():
             return path
