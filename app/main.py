@@ -1715,9 +1715,20 @@ class ReportPaginator(RecordPaginatorBase):
         records: Sequence[dict],
         requester: discord.User,
         *,
+        context: ProfileContext,
+        fallback_reason: Optional[str] = None,
         context_note: Optional[str] = None,
     ) -> None:
-        super().__init__(client, settings, requester, records, initial_content=context_note)
+        record_matches = [
+            RecordMatch(
+                record=record,
+                context=context,
+                fallback_reason=(record.get("fallback_reason") if isinstance(record, Mapping) else None)
+                or fallback_reason,
+            )
+            for record in records
+        ]
+        super().__init__(client, settings, requester, record_matches, initial_content=context_note)
         self.ticket_store = ticket_store
         self._busy_actions: set[str] = set()
         self._message_cache: dict[tuple[int, int], discord.Message] = {}
@@ -1726,7 +1737,11 @@ class ReportPaginator(RecordPaginatorBase):
         return "表示可能な検知がありません。"
 
     def _record_from_item(self, item: Any) -> dict:
-        return item
+        entry: RecordMatch = item
+        return entry.record
+
+    def _current_entry(self) -> RecordMatch:
+        return self._current_item()
 
     def _update_additional_buttons(self, has_items: bool) -> None:
         targets_available = has_items and self._message_targets() is not None
@@ -2460,6 +2475,8 @@ def register_commands(
                 ticket_store,
                 records,
                 interaction.user,
+                context=context_result.context,
+                fallback_reason=fallback_reason,
                 context_note=context_notice,
             )
             await view.send_initial(interaction)

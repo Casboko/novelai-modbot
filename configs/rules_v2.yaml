@@ -14,6 +14,7 @@ rule_titles:
   B-RED-NSFW-EXPL-001: 非NSFWチャンネル× Explicit
   B-ORG-NSFW-QUES-STRICT-001: 非NSFWチャンネル× Questionable+
   C-ORG-QUES-STRICT-001: 非合意 × Questionable以上
+  C-ORG-QUES-STRICT-002: 非合意 × Questionable以上（低シェア）
   E-RED-QPLUS-BEST-001: 獣姦 × Questionable以上
   E-ORG-QPLUS-SUS-001: 獣姦疑い × Questionable以上
   E-YEL-QPLUS-PRES-001: 動物存在 × Questionable以上
