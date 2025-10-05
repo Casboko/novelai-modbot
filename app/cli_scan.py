@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Path to const override file (YAML/JSON) applied after rules thresholds",
     )
+    parser.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="Merge findings into existing JSONL instead of overwriting",
+    )
     return parser.parse_args()
 
 
@@ -140,6 +145,7 @@ def main() -> None:
         include_attachments=not args.no_attachments,
         drop_attachment_urls=args.drop_attachment_urls,
         attachments_report_path=(args.findings.with_name("p3_report_ext.csv") if args.csv_attachments else None),
+        merge_existing=args.merge_existing,
     )
     if args.dry_run:
         print("[dry-run] findings not written")

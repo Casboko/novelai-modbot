@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Iterable
 
 from dotenv import load_dotenv
 from PIL import Image
@@ -25,6 +25,7 @@ from .cache_wd14 import CacheKey, WD14Cache
 from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .labelspace import LabelSpace, ensure_local_files, load_labelspace, REPO_ID
 from .local_cache import resolve_local_file
+from .jsonl_merge import merge_jsonl_records
 
 
 @dataclass(slots=True)
@@ -88,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         choices=LOG_LEVEL_CHOICES,
         default=log_level_default,
         help="Optional logging level override",
+    )
+    parser.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="Merge results into existing JSONL instead of overwriting",
     )
     return parser.parse_args()
 
@@ -272,15 +278,30 @@ async def run() -> None:
                     },
                 )
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as fp:
-        for phash in all_phashes:
-            payload = cache_key_map.get(phash)
-            if payload is None:
-                continue
-            entry = entries[phash]
-            json.dump(serialize_prediction(phash, entry, payload), fp, ensure_ascii=False)
-            fp.write("\n")
+    records: dict[str, dict] = {}
+    for phash in all_phashes:
+        payload = cache_key_map.get(phash)
+        if payload is None:
+            continue
+        entry = entries[phash]
+        records[phash] = serialize_prediction(phash, entry, payload)
+
+    if args.merge_existing:
+        merge_jsonl_records(
+            base_path=args.out,
+            updates=records,
+            key_field="phash",
+            out_path=args.out,
+        )
+    else:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with args.out.open("w", encoding="utf-8") as fp:
+            for phash in all_phashes:
+                record = records.get(phash)
+                if record is None:
+                    continue
+                json.dump(record, fp, ensure_ascii=False)
+                fp.write("\n")
 
     success_count = sum(1 for payload in cache_key_map.values() if "error" not in payload)
     metrics = {

@@ -25,6 +25,7 @@ from .calibration import apply_wd14_calibration, load_calibration
 from .schema import MessageRef, NudityDetection, parse_bool
 from .output_paths import default_analysis_path
 from .local_cache import resolve_local_file
+from .jsonl_merge import merge_jsonl_records
 
 
 STRONG_KEYWORDS = (
@@ -157,6 +158,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Seed for deterministic operations (e.g. latency sampling)",
+    )
+    parser.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="Merge results into existing JSONL instead of overwriting",
     )
     return parser.parse_args()
 
@@ -372,11 +378,12 @@ async def async_main() -> None:
 
     total_records = 0
     records: list[dict] = []
+    record_updates: dict[str, dict] = {}
     out_handle = None
 
-    if args.buffered:
+    if args.buffered and not args.merge_existing:
         records = []
-    else:
+    if not args.buffered and not args.merge_existing:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         out_handle = args.out.open("w", encoding="utf-8")
 
@@ -600,9 +607,11 @@ async def async_main() -> None:
                     "nudenet_error": failures.get(phash),
                 },
             }
-            if args.buffered:
+            if args.merge_existing:
+                record_updates[phash] = record
+            if args.buffered and not args.merge_existing:
                 records.append(record)
-            else:
+            elif not args.merge_existing:
                 json.dump(record, out_handle, ensure_ascii=False)
                 out_handle.write("\n")
             total_records += 1
@@ -610,7 +619,14 @@ async def async_main() -> None:
         if out_handle is not None:
             out_handle.close()
 
-    if args.buffered:
+    if args.merge_existing:
+        merge_jsonl_records(
+            base_path=args.out,
+            updates=record_updates,
+            key_field="phash",
+            out_path=args.out,
+        )
+    elif args.buffered:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("w", encoding="utf-8") as fp:
             for record in records:

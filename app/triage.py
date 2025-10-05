@@ -20,6 +20,7 @@ from .output_paths import default_analysis_path, default_findings_path, default_
 from .p3_stream import FindingsWriter, evaluate_stream, _build_contract_payload
 from .rule_engine import EvaluationResult, RuleEngine
 from .triage_attachments import P0Index
+from .jsonl_merge import merge_jsonl_records
 
 
 FINDINGS_PATH = default_findings_path()
@@ -110,6 +111,7 @@ def run_scan(
     include_attachments: bool = True,
     drop_attachment_urls: bool = False,
     attachments_report_path: Path | None = None,
+    merge_existing: bool = False,
 ) -> ScanSummary:
     """Evaluate analysis records and write findings adhering to the p3 contract.
 
@@ -189,8 +191,11 @@ def run_scan(
     collector: List[dict] = []
     metrics_path = Path(metrics_path) if metrics_path else None
 
-    context = FindingsWriter(findings_path) if not dry_run else nullcontext(None)
-    with context as writer:
+    writer_context = nullcontext(None)
+    if not dry_run and not merge_existing:
+        writer_context = FindingsWriter(findings_path)
+
+    with writer_context as writer:
         if fallback is None:
             report = evaluate_stream(
                 engine,
@@ -213,6 +218,20 @@ def run_scan(
                 metrics_path,
                 fallback,
             )
+
+    if merge_existing and not dry_run:
+        updates = {}
+        for payload in collector:
+            key = payload.get("phash")
+            if key is None:
+                continue
+            updates[str(key)] = payload
+        merge_jsonl_records(
+            base_path=findings_path,
+            updates=updates,
+            key_field="phash",
+            out_path=findings_path,
+        )
 
     if attachment_index is not None:
         logger.info(
