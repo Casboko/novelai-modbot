@@ -4,17 +4,18 @@ import argparse
 import sys
 from pathlib import Path
 
+from .config import get_settings
 from .engine.loader import load_const_overrides_from_path
-from .output_paths import default_analysis_path, default_findings_path
 from .mode_resolver import has_version_mismatch, resolve_policy
+from .profiles import PartitionPaths
 from .rule_engine import RuleEngine
 from .triage import run_scan
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run rule evaluation on analysis output")
-    parser.add_argument("--analysis", type=Path, default=default_analysis_path())
-    parser.add_argument("--findings", type=Path, default=default_findings_path())
+    parser.add_argument("--analysis", type=Path, help="Analysis JSONL path or directory")
+    parser.add_argument("--findings", type=Path, help="Findings JSONL output path override")
     parser.add_argument("--rules", type=Path, default=Path("configs/rules_v2.yaml"))
     parser.add_argument("--channel", action="append", help="Channel ID to include (repeatable)")
     parser.add_argument(
@@ -83,11 +84,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Merge findings into existing JSONL instead of overwriting",
     )
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved by profile timezone",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    partitions = PartitionPaths(context)
+    if args.analysis is None:
+        args.analysis = partitions.stage_file("p2")
+    if args.findings is None:
+        args.findings = partitions.stage_file("p3")
+    if args.metrics is None:
+        args.metrics = partitions.metrics_file("p3")
+    if args.p0 is None and not args.no_attachments:
+        p0_candidate = partitions.stage_file("p0")
+        if p0_candidate.exists():
+            args.p0 = p0_candidate
     severity = None
     if args.severity and args.severity.lower() != "all":
         severity = [token.strip().lower() for token in args.severity.split(",") if token.strip()]

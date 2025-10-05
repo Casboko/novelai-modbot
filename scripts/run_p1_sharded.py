@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import json
 import os
 import sys
@@ -9,14 +10,16 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import glob
 from typing import Any, Dict, Iterable, List, Optional
+
+from app.config import get_settings
+from app.profiles import PartitionPaths
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run WD14 inference shards with orchestration")
     parser.add_argument("--shard-glob", required=True, help="Glob pattern to locate shard CSV files")
-    parser.add_argument("--out-dir", type=Path, default=Path("out"))
+    parser.add_argument("--out-dir", type=Path, help="Output directory for shard artifacts")
     parser.add_argument("--provider", type=str, default="cpu")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=4)
@@ -30,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         "--extra-args",
         nargs=argparse.REMAINDER,
         help="Additional arguments appended to each cli_wd14 invocation",
+    )
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved via profile timezone",
     )
     return parser.parse_args()
 
@@ -104,7 +113,7 @@ def prepare_tasks(args: argparse.Namespace) -> list[ShardTask]:
         raise SystemExit(f"No shard files matched: {args.shard_glob}")
     out_dir = args.out_dir
     p1_dir = out_dir / "p1"
-    metrics_dir = out_dir / "metrics"
+    metrics_dir = out_dir / "metrics" / "p1"
     p1_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -278,6 +287,13 @@ async def run_all(tasks: list[ShardTask], args: argparse.Namespace, manifest: Ma
 
 def main() -> None:
     args = parse_args()
+    settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    partitions = PartitionPaths(context)
+    if args.out_dir is None:
+        args.out_dir = partitions.profile_root(ensure=True)
+    if args.status_file is None:
+        args.status_file = partitions.status_manifest("p1", ensure_parent=True)
     tasks = prepare_tasks(args)
     manifest = Manifest(stage="p1", path=args.status_file)
     exit_code = asyncio.run(run_all(tasks, args, manifest))

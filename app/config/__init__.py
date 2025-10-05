@@ -32,6 +32,22 @@ class Settings(BaseSettings):
 
     # Locale defaults
     timezone: str = Field(default="Asia/Tokyo", alias="TZ")
+    profile_default: str = Field(default="current", alias="MODBOT_PROFILE")
+    profile_retention_days: int = Field(default=14, alias="MODBOT_PROFILE_RETENTION_DAYS")
+    profile_timezone: Optional[str] = Field(default=None, alias="MODBOT_TZ")
+
+    def build_profile_context(self, profile: str | None = None, date: str | None = None):
+        """Construct a profile context using stored defaults."""
+
+        from ..profiles import ProfileContext  # imported lazily to avoid cycle
+
+        timezone_hint = self.profile_timezone or self.timezone
+        return ProfileContext.from_cli(
+            profile_arg=profile,
+            date_arg=date,
+            default_profile=self.profile_default,
+            timezone_hint=timezone_hint,
+        )
 
 
 @lru_cache(maxsize=1)

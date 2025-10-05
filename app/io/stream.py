@@ -6,18 +6,24 @@ from typing import Iterator, Literal
 
 from ..engine.types import DslPolicy
 
-SortMode = Literal["name", "mtime"]
+SortMode = Literal["name", "mtime", "reverse-name", "reverse-mtime"]
 
 
 def _expand_paths(path: Path, pattern: str, sort: SortMode) -> list[Path]:
     if path.is_file():
         return [path]
-    candidates = path.glob(pattern)
-    if sort == "name":
+    candidates = [candidate for candidate in path.glob(pattern) if candidate.is_file()]
+    if sort in ("name", "reverse-name"):
         ordered = sorted(candidates, key=lambda item: item.name)
-    else:
+        if sort.startswith("reverse"):
+            ordered.reverse()
+    elif sort in ("mtime", "reverse-mtime"):
         ordered = sorted(candidates, key=lambda item: item.stat().st_mtime)
-    return [item for item in ordered if item.is_file()]
+        if sort.startswith("reverse"):
+            ordered.reverse()
+    else:  # pragma: no cover - defensive fallback
+        ordered = sorted(candidates, key=lambda item: item.name)
+    return ordered
 
 
 def iter_jsonl(
@@ -29,6 +35,23 @@ def iter_jsonl(
     offset: int = 0,
     policy: DslPolicy | None = None,
 ) -> Iterator[dict]:
+    """Yield JSONL records from ``source``.
+
+    Parameters
+    ----------
+    source:
+        Path or directory containing JSONL files.
+    pattern:
+        Glob pattern evaluated when ``source`` is a directory.
+    sort:
+        Ordering for matched files. ``reverse-*`` variants invert the selection.
+    limit:
+        Maximum number of records to yield (0 disables the limit).
+    offset:
+        Number of records to skip across the merged stream before yielding.
+    policy:
+        Optional DSL policy used for structured warning emission on decode errors.
+    """
     path = Path(source)
     files = _expand_paths(path, pattern, sort)
     produced = 0

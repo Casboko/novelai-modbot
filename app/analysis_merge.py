@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import sys
 import time
 from collections import defaultdict
@@ -17,15 +18,17 @@ import random
 import yaml
 
 from .engine.tag_norm import normalize_pair, normalize_tag
+from .config import get_settings
 from .config.rules_dicts import RulesDictError, extract_nsfw_general_tags
 from .analyzer_nudenet import NudeNetAnalyzer
 from .batch_loader import ImageRequest, load_images
 from .cache_nudenet import CacheKey as NudeCacheKey, NudeNetCache
 from .calibration import apply_wd14_calibration, load_calibration
 from .schema import MessageRef, NudityDetection, parse_bool
-from .output_paths import default_analysis_path
 from .local_cache import resolve_local_file
 from .jsonl_merge import merge_jsonl_records
+from .io.stream import SortMode, iter_jsonl
+from .profiles import LEGACY_PROFILE, PartitionPaths
 
 
 STRONG_KEYWORDS = (
@@ -50,6 +53,10 @@ DEFAULT_EXPOSED_LABELS = {
     "BUTTOCKS_EXPOSED",
     "ANUS_EXPOSED",
 }
+
+DEFAULT_SCAN_PATTERN = "p0_*.csv"
+DEFAULT_WD14_PATTERN = "p1_*.jsonl"
+DEFAULT_NUDENET_CACHE_PATH = Path("app/cache_nudenet.sqlite")
 
 
 def _normalize_flag(flag: str) -> str:
@@ -129,11 +136,37 @@ def compute_nudity_exposure_metrics(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Merge WD14 and NudeNet analysis")
-    parser.add_argument("--scan", type=Path, default=Path("out/p0_scan.csv"))
-    parser.add_argument("--wd14", type=Path, default=Path("out/p1_wd14.jsonl"))
-    parser.add_argument("--out", type=Path, default=default_analysis_path())
-    parser.add_argument("--metrics", type=Path, default=Path("out/p2_metrics.json"))
-    parser.add_argument("--nudenet-cache", type=Path, default=Path("app/cache_nudenet.sqlite"))
+    parser.add_argument("--scan", type=Path, help="Scan CSV or directory path")
+    parser.add_argument(
+        "--scan-pattern",
+        type=str,
+        default=None,
+        help="Glob pattern when --scan is a directory (default p0_*.csv)",
+    )
+    parser.add_argument(
+        "--scan-sort",
+        type=str,
+        choices=["name", "mtime", "reverse-name", "reverse-mtime"],
+        default="name",
+        help="Ordering for matched scan files",
+    )
+    parser.add_argument("--wd14", type=Path, help="WD14 JSONL or directory path")
+    parser.add_argument(
+        "--wd14-pattern",
+        type=str,
+        default=None,
+        help="Glob pattern when --wd14 is a directory (default p1_*.jsonl)",
+    )
+    parser.add_argument(
+        "--wd14-sort",
+        type=str,
+        choices=["name", "mtime", "reverse-name", "reverse-mtime"],
+        default="name",
+        help="Ordering for matched WD14 files",
+    )
+    parser.add_argument("--out", type=Path, help="Output analysis JSONL path override")
+    parser.add_argument("--metrics", type=Path, help="Metrics JSON path override")
+    parser.add_argument("--nudenet-cache", type=Path, help="NudeNet cache database override")
     parser.add_argument("--nudenet-config", type=Path, default=Path("configs/nudenet.yaml"))
     parser.add_argument("--xsignals-config", type=Path, default=Path("configs/xsignals.yaml"))
     parser.add_argument("--rules-config", type=Path, default=Path("configs/rules_v2.yaml"))
@@ -164,6 +197,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Merge results into existing JSONL instead of overwriting",
     )
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved by profile timezone",
+    )
     return parser.parse_args()
 
 
@@ -172,44 +211,42 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(fp)
 
 
-def load_scan_metadata(csv_path: Path, limit: int = 0) -> dict[str, dict]:
+def load_scan_metadata(csv_paths: Sequence[Path], limit: int = 0) -> dict[str, dict]:
     entries: dict[str, dict] = {}
-    with csv_path.open("r", encoding="utf-8") as fp:
-        reader = csv.DictReader(fp)
-        for row in reader:
-            phash = (row.get("phash_hex") or "").strip()
-            if not phash:
-                continue
-            url = (row.get("url") or "").strip()
-            if not url:
-                continue
-            entry = entries.setdefault(
-                phash,
-                {
-                    "rows": [],
-                    "urls": set(),
-                },
-            )
-            entry["rows"].append(row)
-            entry["urls"].add(url)
-            if limit and len(entries) >= limit:
-                break
+    for csv_path in csv_paths:
+        with csv_path.open("r", encoding="utf-8") as fp:
+            reader = csv.DictReader(fp)
+            for row in reader:
+                phash = (row.get("phash_hex") or "").strip()
+                if not phash:
+                    continue
+                url = (row.get("url") or "").strip()
+                if not url:
+                    continue
+                entry = entries.setdefault(
+                    phash,
+                    {
+                        "rows": [],
+                        "urls": set(),
+                    },
+                )
+                entry["rows"].append(row)
+                entry["urls"].add(url)
+                if limit and len(entries) >= limit:
+                    return entries
     return entries
 
 
-def load_wd14(path: Path, limit: int = 0) -> dict[str, dict]:
+def load_wd14(paths: Sequence[Path], limit: int = 0) -> dict[str, dict]:
     data: dict[str, dict] = {}
-    with path.open("r", encoding="utf-8") as fp:
-        for idx, line in enumerate(fp):
-            if not line.strip():
-                continue
-            payload = json.loads(line)
+    for path in paths:
+        for payload in iter_jsonl(path):
             phash = payload.get("phash")
             if not phash:
                 continue
             data[phash] = payload
             if limit and len(data) >= limit:
-                break
+                return data
     return data
 
 
@@ -225,6 +262,61 @@ def to_message_ref(row: dict) -> MessageRef:
         is_nsfw_channel=parse_bool(row.get("is_nsfw_channel")),
         created_at=row.get("created_at"),
     )
+
+
+def _sort_paths(candidates: Iterable[Path], sort: SortMode) -> list[Path]:
+    files = [path for path in candidates if path.is_file()]
+    if sort in ("name", "reverse-name"):
+        files.sort(key=lambda item: item.name)
+    elif sort in ("mtime", "reverse-mtime"):
+        files.sort(key=lambda item: item.stat().st_mtime)
+    else:
+        files.sort(key=lambda item: item.name)
+    if sort.startswith("reverse"):
+        files.reverse()
+    return files
+
+
+def _resolve_scan_paths(args: argparse.Namespace, partitions: PartitionPaths) -> list[Path]:
+    pattern = args.scan_pattern or DEFAULT_SCAN_PATTERN
+    sort_mode: SortMode = args.scan_sort  # type: ignore[assignment]
+    if args.scan:
+        if args.scan.is_dir():
+            resolved = _sort_paths(args.scan.glob(pattern), sort_mode)
+        else:
+            if not args.scan.exists():
+                raise SystemExit(f"Scan path not found: {args.scan}")
+            resolved = [args.scan]
+    else:
+        candidate = partitions.stage_file("p0")
+        if candidate.exists():
+            resolved = [candidate]
+        else:
+            resolved = _sort_paths(partitions.stage_dir("p0").glob(pattern), sort_mode)
+    if not resolved:
+        raise SystemExit("No scan CSV files found for analysis merge")
+    return resolved
+
+
+def _resolve_wd14_paths(args: argparse.Namespace, partitions: PartitionPaths) -> list[Path]:
+    pattern = args.wd14_pattern or DEFAULT_WD14_PATTERN
+    sort_mode: SortMode = args.wd14_sort  # type: ignore[assignment]
+    if args.wd14:
+        if args.wd14.is_dir():
+            resolved = _sort_paths(args.wd14.glob(pattern), sort_mode)
+        else:
+            if not args.wd14.exists():
+                raise SystemExit(f"WD14 path not found: {args.wd14}")
+            resolved = [args.wd14]
+    else:
+        candidate = partitions.stage_file("p1")
+        if candidate.exists():
+            resolved = [candidate]
+        else:
+            resolved = _sort_paths(partitions.stage_dir("p1").glob(pattern), sort_mode)
+    if not resolved:
+        raise SystemExit("No WD14 JSONL files found for analysis merge")
+    return resolved
 
 
 def summarize_messages(rows: Iterable[dict]) -> tuple[MessageRef, list[MessageRef]]:
@@ -308,8 +400,34 @@ def _matches_keyword(label: str, keywords: Iterable[str]) -> bool:
 async def async_main() -> None:
     args = parse_args()
     random.seed(args.seed)
-    scan_entries = load_scan_metadata(args.scan, args.limit)
-    wd14_entries = load_wd14(args.wd14, args.limit)
+    settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    partitions = PartitionPaths(context)
+
+    scan_paths = _resolve_scan_paths(args, partitions)
+    wd14_paths = _resolve_wd14_paths(args, partitions)
+
+    if args.out is None:
+        args.out = partitions.stage_file("p2")
+    if args.metrics is None:
+        args.metrics = partitions.metrics_file("p2")
+
+    cache_suffix = os.getenv("NUDENET_CACHE_SUFFIX", "").strip()
+    if args.nudenet_cache is None:
+        if cache_suffix:
+            cache_name = f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{cache_suffix}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
+            args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH.with_name(cache_name)
+        elif context.profile == LEGACY_PROFILE:
+            legacy_name = f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{LEGACY_PROFILE}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
+            args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH.with_name(legacy_name)
+        else:
+            args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH
+    elif cache_suffix and args.nudenet_cache == DEFAULT_NUDENET_CACHE_PATH:
+        cache_name = f"{DEFAULT_NUDENET_CACHE_PATH.stem}_{cache_suffix}{DEFAULT_NUDENET_CACHE_PATH.suffix}"
+        args.nudenet_cache = DEFAULT_NUDENET_CACHE_PATH.with_name(cache_name)
+
+    scan_entries = load_scan_metadata(scan_paths, args.limit)
+    wd14_entries = load_wd14(wd14_paths, args.limit)
     nudenet_cfg = load_yaml(args.nudenet_config)
     xsignals_cfg = load_yaml(args.xsignals_config)
     try:

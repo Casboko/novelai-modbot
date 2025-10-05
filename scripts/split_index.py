@@ -6,13 +6,22 @@ import math
 from pathlib import Path
 from typing import Iterable
 
+from app.config import get_settings
+from app.profiles import PartitionPaths
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Split p0 index CSV into shards")
-    parser.add_argument("--input", type=Path, default=Path("out/p0_scan.csv"))
-    parser.add_argument("--out-dir", type=Path, default=Path("out/p0"))
+    parser.add_argument("--input", type=Path, help="Input CSV to split")
+    parser.add_argument("--out-dir", type=Path, help="Output directory for shards")
     parser.add_argument("--shards", type=int, default=1, help="Number of shards to produce")
     parser.add_argument("--force", action="store_true", help="Overwrite existing shard files")
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved via profile timezone",
+    )
     return parser.parse_args()
 
 
@@ -63,6 +72,14 @@ def write_shard(path: Path, header: list[str], rows: list[dict[str, str]]) -> No
 
 def main() -> None:
     args = parse_args()
+    settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    partitions = PartitionPaths(context)
+    if args.input is None:
+        args.input = partitions.stage_file("p0")
+    if args.out_dir is None:
+        args.out_dir = partitions.stage_dir("p0", ensure=True) / "shards"
+        args.out_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.input.is_file():
         raise SystemExit(f"Input file not found: {args.input}")

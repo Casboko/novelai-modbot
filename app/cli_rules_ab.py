@@ -8,9 +8,11 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+from .config import get_settings
 from .io.stream import iter_jsonl
 from .engine.loader import load_const_overrides_from_path
 from .mode_resolver import has_version_mismatch, resolve_policy
+from .profiles import PartitionPaths
 from .rule_engine import RuleEngine
 
 SEVERITY_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
@@ -21,7 +23,7 @@ MAX_REASON_LENGTH = 80
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare rule configurations (A/B)")
-    parser.add_argument("--analysis", type=Path, required=True, help="Analysis JSONL file or directory")
+    parser.add_argument("--analysis", type=Path, help="Analysis JSONL file or directory")
     parser.add_argument("--rulesA", type=Path, required=True, help="Rules configuration for variant A")
     parser.add_argument("--rulesB", type=Path, required=True, help="Rules configuration for variant B")
     parser.add_argument("--out-json", type=Path, help="Path to write summary JSON")
@@ -55,6 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-config", action="store_true", help="Print DSL configuration summaries")
     parser.add_argument("--constA", type=Path, help="Const override file applied to rulesA")
     parser.add_argument("--constB", type=Path, help="Const override file applied to rulesB")
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved via profile timezone",
+    )
     return parser.parse_args()
 
 
@@ -321,24 +329,24 @@ def build_csv_row(record: dict, res_a, res_b) -> list:
 def main() -> None:
     args = parse_args()
 
-    out_json_path = args.out_json
-    out_csv_path = args.out_csv
-    export_dir = args.export_dir
-    if args.out_dir:
-        base = args.out_dir
-        if out_json_path is None:
-            out_json_path = base / "p3_ab_compare.json"
-        if out_csv_path is None:
-            out_csv_path = base / "p3_ab_diff.csv"
-        if export_dir is None:
-            export_dir = base
+    settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    partitions = PartitionPaths(context)
+    if args.analysis is None:
+        args.analysis = partitions.stage_file("p2")
+    out_dir = args.out_dir or (partitions.profile_root(ensure=True) / "metrics" / "ab")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if out_json_path is None or out_csv_path is None:
-        print("[error] --out-json/--out-csv を指定するか --out-dir で出力先をまとめて指定してください。", file=sys.stderr)
-        sys.exit(1)
+    out_json_path = args.out_json or (out_dir / "p3_ab_compare.json")
+    out_csv_path = args.out_csv or (out_dir / "p3_ab_diff.csv")
+    export_dir = args.export_dir or out_dir
 
-    if export_dir is None:
-        export_dir = Path("out/exports")
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    if not args.analysis.exists():
+        raise SystemExit(f"Analysis path not found: {args.analysis}")
+    if not export_dir.exists():
+        export_dir.mkdir(parents=True, exist_ok=True)
 
     override_mode = args.lock_mode or args.dsl_mode
 

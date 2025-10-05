@@ -5,6 +5,10 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
+from app.config import get_settings
+from app.profiles import PartitionPaths
 
 
 @dataclass
@@ -22,20 +26,18 @@ def parse_iso8601(value: str | None) -> datetime | None:
     return dt
 
 
-def parse_args() -> tuple[Path, Path, Range]:
+def parse_args() -> tuple[Path | None, Path | None, Range, str | None, str | None]:
     parser = argparse.ArgumentParser(
         description="Filter p0 scan CSV by created_at timestamp",
     )
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("out/p0_scan.csv"),
         help="Source CSV file from p0 scan",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        required=True,
         help="Destination CSV to write filtered rows",
     )
     parser.add_argument(
@@ -48,6 +50,12 @@ def parse_args() -> tuple[Path, Path, Range]:
         type=str,
         help="Inclusive ISO8601 upper bound (UTC assumed when tz missing)",
     )
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved via profile timezone",
+    )
     args = parser.parse_args()
 
     start_dt = parse_iso8601(args.start)
@@ -55,7 +63,7 @@ def parse_args() -> tuple[Path, Path, Range]:
     if start_dt and end_dt and start_dt > end_dt:
         parser.error("--start must be <= --end")
 
-    return args.input, args.out, Range(start=start_dt, end=end_dt)
+    return args.input, args.out, Range(start=start_dt, end=end_dt), args.profile, args.date
 
 
 def should_keep(created_at: str, interval: Range) -> bool:
@@ -96,7 +104,14 @@ def filter_csv(source: Path, destination: Path, interval: Range) -> tuple[int, i
 
 
 def main() -> None:
-    source, destination, interval = parse_args()
+    source, destination, interval, profile_arg, date_arg = parse_args()
+    settings = get_settings()
+    context = settings.build_profile_context(profile=profile_arg, date=date_arg)
+    partitions = PartitionPaths(context)
+    if source is None:
+        source = partitions.stage_file("p0")
+    if destination is None:
+        destination = partitions.stage_dir("p0", ensure=True) / f"filtered_{context.iso_date}.csv"
     if not source.exists():
         raise SystemExit(f"Input file not found: {source}")
     total, kept = filter_csv(source, destination, interval)
@@ -105,4 +120,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

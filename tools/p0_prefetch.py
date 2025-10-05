@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from app.config import get_settings
 from app.http_client import ImageFetcher, RateLimiter
+from app.profiles import PartitionPaths
 
 
 MANIFEST_FILENAME = "p0_images.csv"
@@ -62,7 +64,7 @@ def determine_cache_root(cli_value: Optional[Path]) -> Path:
 
 def parse_args() -> PrefetchArgs:
     parser = argparse.ArgumentParser(description="Prefetch original images referenced by p0 scan")
-    parser.add_argument("--p0", type=Path, default=Path("out/p0_scan.csv"))
+    parser.add_argument("--p0", type=Path)
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--manifest", type=Path, help="Override manifest output path")
     parser.add_argument("--qps", type=float, default=8.0, help="Max HTTP requests per second")
@@ -72,7 +74,19 @@ def parse_args() -> PrefetchArgs:
         action="store_true",
         help="Retry entries whose manifest status is miss/error",
     )
+    parser.add_argument("--profile", type=str, help="Profile name for partition defaults")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default resolved via profile timezone",
+    )
     ns = parser.parse_args()
+
+    settings = get_settings()
+    context = settings.build_profile_context(profile=ns.profile, date=ns.date)
+    partitions = PartitionPaths(context)
+    if ns.p0 is None:
+        ns.p0 = partitions.stage_file("p0")
 
     cache_root = determine_cache_root(ns.cache_root)
     manifest_dir = cache_root / "manifest"

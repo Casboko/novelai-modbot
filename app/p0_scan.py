@@ -8,7 +8,7 @@ import json
 import logging
 import mimetypes
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as time_cls, timezone
 from pathlib import Path
 from typing import AsyncIterator, Iterable, Optional
 
@@ -18,6 +18,7 @@ import imagehash
 from discord import abc
 
 from .config import get_settings
+from .profiles import PartitionPaths, ProfileContext
 from .http_client import ImageFetcher, RateLimiter
 from .util import compute_phash
 
@@ -62,6 +63,8 @@ class ScanOptions:
     out_path: Path
     state_path: Path
     cache_path: Path
+    attachments_index_path: Path
+    profile: ProfileContext
 
 
 class CursorStore:
@@ -267,6 +270,8 @@ class ScanRunner:
         self._cache = PhashCache(options.cache_path)
         self._sink = CsvSink(options.out_path)
         self._phash_index = PhashIndex()
+        self._attachments_index_path = options.attachments_index_path
+        self._profile_context = options.profile
         self._session: Optional[aiohttp.ClientSession] = None
         self._fetcher: Optional[ImageFetcher] = None
 
@@ -516,26 +521,54 @@ class ScanRunner:
 def parse_args() -> ScanOptions:
     parser = argparse.ArgumentParser(description="P0 image history scanner")
     parser.add_argument("--guild", type=int, help="Guild ID override")
-    parser.add_argument("--since", type=str, help="ISO8601 datetime to start from")
+    parser.add_argument(
+        "--since",
+        type=str,
+        help="ISO8601 datetime, 'auto' (default), or 'none' for full history",
+    )
     parser.add_argument("--channels", type=str, help="Comma separated channel IDs or names")
     parser.add_argument("--include-archived-threads", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--qps", type=float, default=5.0)
-    parser.add_argument("--out", type=Path, default=Path("out/p0_scan.csv"))
-    parser.add_argument("--state", type=Path, default=Path("out/p0_state.json"))
-    parser.add_argument("--cache", type=Path, default=Path("out/phash_cache.csv"))
+    parser.add_argument("--profile", type=str, help="Profile name to operate on")
+    parser.add_argument(
+        "--date",
+        type=str,
+        help="Partition date (YYYY-MM-DD, today, yesterday). Default: today in profile timezone",
+    )
+    parser.add_argument("--out", type=Path, help="Override output CSV path")
+    parser.add_argument("--state", type=Path, help="Override cursor state path")
+    parser.add_argument("--cache", type=Path, help="Override pHash cache CSV path")
+    parser.add_argument(
+        "--attachments-index",
+        type=Path,
+        help="Override attachments index JSON path",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
+    context = settings.build_profile_context(profile=args.profile, date=args.date)
+    paths = PartitionPaths(context)
     guild_id = args.guild or settings.guild_id
     if guild_id is None:
         raise SystemExit("Guild ID must be provided via --guild or GUILD_ID")
 
     since_dt = None
-    if args.since:
-        since_dt = datetime.fromisoformat(args.since)
-        if since_dt.tzinfo is None:
-            since_dt = since_dt.replace(tzinfo=timezone.utc)
+    since_arg = args.since.strip() if args.since else None
+    if since_arg:
+        lowered = since_arg.lower()
+        if lowered in {"none", "all"}:
+            since_dt = None
+        elif lowered == "auto":
+            since_dt = datetime.combine(context.date, time_cls(0, 0), tzinfo=context.tzinfo)
+        else:
+            since_dt = datetime.fromisoformat(since_arg)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=context.tzinfo)
+            else:
+                since_dt = since_dt.astimezone(context.tzinfo)
+    else:
+        since_dt = datetime.combine(context.date, time_cls(0, 0), tzinfo=context.tzinfo)
 
     filters: set[str] = set()
     if args.channels:
@@ -549,9 +582,11 @@ def parse_args() -> ScanOptions:
         include_archived_threads=args.include_archived_threads,
         resume=args.resume,
         qps=max(args.qps, 1.0),
-        out_path=args.out,
-        state_path=args.state,
-        cache_path=args.cache,
+        out_path=args.out or paths.stage_file("p0"),
+        state_path=args.state or paths.p0_state_path(),
+        cache_path=args.cache or paths.p0_cache_path(),
+        attachments_index_path=args.attachments_index or paths.attachments_index(),
+        profile=context,
     )
 
 
