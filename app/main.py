@@ -31,7 +31,12 @@ from .profiles import (
 from .rule_engine import RuleEngine
 from .triage import iter_findings, load_findings_async, resolve_time_range, run_scan, write_report_csv
 from .store import Ticket, TicketStore
-from .util import parse_message_link
+from .util import (
+    EXPOSURE_AXIS_LABEL_JP,
+    ellipsize_inline,
+    parse_message_link,
+    summarize_exposure_axes,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .config import Settings
@@ -876,11 +881,7 @@ async def send_ticket_log(
         profile=ticket.profile,
         date=_partition_date_arg(ticket.partition_date),
     )
-    embed.add_field(
-        name="プロファイル情報",
-        value=_format_context_notice(ticket_context, None),
-        inline=False,
-    )
+    logger.debug("ticket %s context: %s", ticket.ticket_id, _format_context_notice(ticket_context, None))
     fallback_value = None
     if isinstance(record, dict):
         fallback_value = record.get("fallback_reason")
@@ -1201,67 +1202,55 @@ def build_record_embed(
                 if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
                     rule_map[str(entry["id"])] = entry
 
-    selected_features: list[tuple[str, float]] = []
-    seen_features: set[str] = set()
-    for key in _FEATURE_PRIORITY:
-        if key in features and key not in seen_features:
-            selected_features.append((key, features[key]))
-            seen_features.add(key)
-        if len(selected_features) >= 8:
-            break
-    if len(selected_features) < 8:
-        for name in sorted(features, key=features.get, reverse=True):
-            if name in seen_features:
-                continue
-            selected_features.append((name, features[name]))
-            seen_features.add(name)
-            if len(selected_features) >= 8:
-                break
-    if selected_features:
-        feature_lines = [f"{name}: {value:.3f}" for name, value in selected_features[:8]]
-        block = _truncate_block(feature_lines)
-        if block:
-            embed.add_field(name="V2 features（上位）", value=block, inline=False)
+    # V2 features are collected for diagnostics but現在は UI に表示しない。
+
+    embed.add_field(name="レーティング", value=_format_wd14_rating_block(record), inline=True)
+    exposure_peaks = summarize_exposure_axes(record.get("nudity_detections", []))
+    if any(value > 0.0 for value in exposure_peaks.values()):
+        axis_order = ("BREAST", "FG", "MG", "AN")
+        segments = [
+            f"{EXPOSURE_AXIS_LABEL_JP[axis]} {exposure_peaks[axis]:.2f}"
+            for axis in axis_order
+        ]
+        nudity_value = "\u30fb".join(segments)
+    else:
+        nudity_value = "—"
+    embed.add_field(name="露出 (NudeNet)", value=nudity_value, inline=True)
+    embed.add_field(name="\u200B", value="\u200B", inline=False)
 
     if groups_config:
-        group_lines: list[str] = []
-        for group_name in _DISPLAY_GROUPS:
-            patterns = groups_config.get(group_name) or groups_config.get(normalize_tag(group_name)) or ()
-            hits = group_top_tags(tag_scores, patterns, k=5, min_score=0.10)
-            if hits:
-                group_lines.append(
-                    f"{group_name}: " + ", ".join(f"{tag}:{score:.2f}" for tag, score in hits)
-                )
-        block = _truncate_block(group_lines, code=False, max_chars=900)
-        if block:
-            embed.add_field(name="タググループ（top hits）", value=block, inline=False)
+        def _hits_text(group_key: str) -> str:
+            patterns = groups_config.get(group_key) or groups_config.get(normalize_tag(group_key)) or ()
+            hits = group_top_tags(tag_scores, patterns, k=4, min_score=0.10)
+            return ", ".join(f"{tag} {score:.2f}" for tag, score in hits) if hits else "—"
 
-    embed.add_field(name="WD14 rating", value=_format_wd14_rating_block(record), inline=False)
-    nudity_list = _format_top_detections(record.get("nudity_detections", []), limit=4)
-    embed.add_field(
-        name="NudeNet 検出",
-        value=", ".join(nudity_list) if nudity_list else "なし",
-        inline=False,
-    )
+        embed.add_field(
+            name="A: 未成年 (Tags)",
+            value=ellipsize_inline(_hits_text("minors")),
+            inline=True,
+        )
+        embed.add_field(
+            name="E: 動物 (Tags)",
+            value=ellipsize_inline(_hits_text("animal_subjects")),
+            inline=True,
+        )
+        embed.add_field(name="\u200B", value="\u200B", inline=False)
+
+        consensual_key = "nonconsensual_tags" if ("nonconsensual_tags" in groups_config) else "violence"
+        embed.add_field(
+            name="D: 流血 (Tags)",
+            value=ellipsize_inline(_hits_text("gore")),
+            inline=True,
+        )
+        embed.add_field(
+            name="C: 非合意 (Tags)",
+            value=ellipsize_inline(_hits_text(consensual_key)),
+            inline=True,
+        )
+        embed.add_field(name="\u200B", value="\u200B", inline=False)
 
     winning = metrics.get("winning") or {}
     rule_id = winning.get("rule_id") if isinstance(winning, Mapping) else None
-    if rule_id and rule_id in rule_map:
-        when_text = rule_map[rule_id].get("when") if isinstance(rule_map[rule_id], Mapping) else None
-        if isinstance(when_text, str) and when_text.strip():
-            lines = _build_when_summary_lines(
-                when_text,
-                record=record,
-                features=features,
-                metrics=metrics,
-                consts=consts,
-                groups=groups_config,
-                tag_scores=tag_scores,
-                limit=6,
-            )
-            block = _truncate_block(lines)
-            if block:
-                embed.add_field(name=f"when 概要（{rule_id}）", value=block, inline=False)
 
     if v2_errors:
         embed.add_field(name="⚠️ V2エラー", value=" / ".join(v2_errors), inline=False)
@@ -1862,8 +1851,11 @@ class ReportPaginator(RecordPaginatorBase):
     ) -> discord.Embed:
         embed = build_record_embed(record, index, total, preview, author)
         entry = self._current_entry()
-        context_notice = _format_context_notice(entry.context, entry.fallback_reason)
-        embed.add_field(name="プロファイル情報", value=context_notice, inline=False)
+        logger.debug(
+            "record %s context: %s",
+            entry.record.get("phash"),
+            _format_context_notice(entry.context, entry.fallback_reason),
+        )
         return embed
 
     def _clear_message_cache(self) -> None:

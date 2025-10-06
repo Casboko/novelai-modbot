@@ -21,6 +21,31 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# このファイルが置かれているディレクトリ（tools/scl_viewer）が先頭に
+# 残っていると、`import app` が同名ファイルを再帰的に読み込み続ける。
+# ルートパスを追加済みなので、衝突を避けるために該当エントリを除外する。
+SCRIPT_DIR = Path(__file__).resolve().parent
+script_dir_candidates = {str(SCRIPT_DIR), str(SCRIPT_DIR.resolve())}
+for idx, entry in list(enumerate(sys.path)):
+    normalized = entry if entry else "."
+    try:
+        resolved = str(Path(normalized).resolve())
+    except (OSError, RuntimeError):
+        continue
+    if resolved in script_dir_candidates:
+        del sys.path[idx]
+
+# Streamlit からこのファイルを実行すると、モジュール名 `app` として
+# `sys.modules` に登録されるため、ルートパッケージ `app` と衝突する。
+# 衝突が発生している場合のみエイリアスを付け替え、以降の
+# `from app import ...` が本来のパッケージを参照できるようにする。
+maybe_script_module = sys.modules.get("app")
+if maybe_script_module is not None:
+    module_path = getattr(maybe_script_module, "__file__", None)
+    if module_path and Path(module_path).resolve() == Path(__file__).resolve():
+        sys.modules.setdefault("tools.scl_viewer.app", maybe_script_module)
+        sys.modules.pop("app", None)
+
 from app.batch_loader import ImageRequest, load_images
 from app.config import get_settings
 from app.local_cache import resolve_local_file
