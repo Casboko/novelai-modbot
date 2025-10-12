@@ -1,2 +1,2 @@
-guild_id,channel_id,message_id,message_link,created_at,author_id,is_nsfw_channel,source,attachment_id,filename,content_type,file_size,url,phash_hex,phash_distance_ref,note
-1,10,500,https://discord.com/channels/1/10/500,2024-01-01T00:00:00+00:00,42,false,attachment,att-1,test.png,image/png,123,https://cdn.example.com/test.png,feedfacefeedface,,
+guild_id,channel_id,channel_name,message_id,message_link,created_at,author_id,author_name,is_nsfw_channel,source,attachment_id,filename,content_type,file_size,url,phash_hex,phash_distance_ref,note
+1,10,test-channel,500,https://discord.com/channels/1/10/500,2024-01-01T00:00:00+00:00,42,Test Author,false,attachment,att-1,test.png,image/png,123,https://cdn.example.com/test.png,feedfacefeedface,,

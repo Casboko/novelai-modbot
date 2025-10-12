@@ -42,12 +42,13 @@ def _write_analysis(path: Path) -> None:
 
 def _write_p0_scan(path: Path, *, phash: str, message_id: str) -> None:
     header = (
-        "guild_id,channel_id,message_id,message_link,created_at,author_id,is_nsfw_channel,"
+        "guild_id,channel_id,channel_name,message_id,message_link,created_at,author_id,author_name,is_nsfw_channel,"
         "source,attachment_id,filename,content_type,file_size,url,phash_hex,phash_distance_ref,note\n"
     )
-    row = \
-        f"1,2,{message_id},https://discord.com/channels/1/2/{message_id},2024-01-01T00:00:00+00:00,42,false,attachment," \
-        f"att-1,test.png,image/png,123,https://cdn.example.com/test.png,{phash},,\n"
+    row = (
+        f"1,2,test-channel,{message_id},https://discord.com/channels/1/2/{message_id},2024-01-01T00:00:00+00:00,"
+        f"42,Test Author,false,attachment,att-1,test.png,image/png,123,https://cdn.example.com/test.png,{phash},,\n"
+    )
     path.write_text(header + row, encoding="utf-8")
 
 
@@ -146,6 +147,10 @@ def test_run_scan_enriches_attachments(tmp_path: Path) -> None:
     assert attachments[0]["content_type"] == "image/png"
     assert attachments[0]["file_size"] == 123
     assert attachments[0]["source"] == "p0"
+    assert attachments[0]["phash_hex"] == phash
+    assert data.get("channel_name") == "test-channel"
+    assert message.get("channel_name") == "test-channel"
+    assert message.get("author_name") == "Test Author"
 
     with report_ext.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)

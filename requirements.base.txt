@@ -11,3 +11,4 @@ huggingface_hub
 PyYAML
 aiosqlite
 jsonschema>=4.20,<5
+httpx>=0.25

@@ -1,0 +1,43 @@
+defaults:
+  timezone: Asia/Tokyo
+  message_url_prefix: "https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+  batch_size: 1
+  rate_limit_seconds: 1.0
+  max_retries: 5
+  alert_cooldown_minutes: 30
+
+channels:
+  findings_yellow:
+    type: webhook
+    endpoint: "${NOTIFY_YELLOW_WEBHOOK}"
+    severity_min: yellow
+    severity_max: yellow
+    mention_roles: []
+    template: findings
+  findings_red:
+    type: webhook
+    endpoint: "${NOTIFY_RED_WEBHOOK}"
+    severity_min: orange
+    mention_roles:
+      - "${MODERATOR_ROLE_ID}"
+    template: findings
+  pipeline_alerts:
+    type: bot
+    channel_id: "${ALERT_CHANNEL_ID}"
+    template: pipeline_error
+
+templates:
+  findings:
+    title: "[{severity}] {rule_id}"
+    description: "{message_url}"
+    fields:
+      - name: "Reasons"
+        value: "{reasons}"
+      - name: "Scores"
+        value: "explicit={rating_explicit:.2f}, questionable={rating_questionable:.2f}"
+  pipeline_error:
+    title: "[Pipeline] {stage} failed"
+    description: "Attempts: {attempts}, Run: {run_id}"
+    fields:
+      - name: "Last stderr"
+        value: "{last_error}"

@@ -545,6 +545,8 @@ def _enrich_records_with_attachments(
                 stats.records_enriched += 1
             if degraded:
                 stats.degraded_records += 1
+        if isinstance(phash, str):
+            _apply_record_metadata(record, index, phash)
         yield record
 
 
@@ -583,6 +585,7 @@ def _apply_attachments_to_record(
             for item in destination
             if isinstance(item, dict) and item.get("id") is not None
         }
+        phash_value = record.get("phash")
         for attachment in attachments:
             key = (msg_id, attachment.get("id"))
             if key in seen_keys:
@@ -592,6 +595,7 @@ def _apply_attachments_to_record(
                 copy["url"] = None
             if copy.get("id") in existing_ids:
                 continue
+            copy.setdefault("phash_hex", attachment.get("phash_hex") or phash_value or None)
             destination.append(copy)
             seen_keys.add(key)
             if copy.get("id") is not None:
@@ -619,6 +623,7 @@ def _apply_attachments_to_record(
                     copy["url"] = None
                 if copy.get("id") in fallback_existing:
                     continue
+                copy.setdefault("phash_hex", attachment.get("phash_hex") or phash_value or None)
                 fallback_attachments.append(copy)
                 seen_keys.add(key)
                 if copy.get("id") is not None:
@@ -627,6 +632,33 @@ def _apply_attachments_to_record(
         else:
             fallback_message = None
     return added, degraded
+
+
+def _apply_record_metadata(record: dict, index: P0Index, phash: str) -> None:
+    def _update(target: dict, meta: dict[str, str]) -> None:
+        if not meta:
+            return
+        channel_name = meta.get("channel_name")
+        author_name = meta.get("author_name")
+        if channel_name and not target.get("channel_name"):
+            target["channel_name"] = channel_name
+        if author_name and not target.get("author_name"):
+            target["author_name"] = author_name
+
+    message_id = record.get("message_id")
+    primary_meta = index.get_metadata(phash, str(message_id) if message_id is not None else None)
+    _update(record, primary_meta)
+
+    for message in record.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        msg_id = message.get("message_id")
+        meta = index.get_metadata(phash, str(msg_id) if msg_id is not None else None)
+        _update(message, meta)
+        attachments = message.get("attachments") or []
+        for attachment in attachments:
+            if isinstance(attachment, dict):
+                attachment.setdefault("phash_hex", phash)
 
 
 def _write_attachment_report(records: Sequence[dict], path: Path) -> None:

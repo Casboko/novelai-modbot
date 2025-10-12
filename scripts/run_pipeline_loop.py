@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -583,7 +584,13 @@ def run_once(
     success = True
     for stage_name, stage_config in stages:
         if not stage_enabled(stage_config):
-            stage_metrics[stage_name] = {"status": "skipped", "duration_sec": None, "records": None}
+            stage_metrics[stage_name] = {
+                "status": "skipped",
+                "duration_sec": None,
+                "records": None,
+                "returncode": None,
+                "last_error": None,
+            }
             logger.info("stage skipped", stage=stage_name)
             continue
 
@@ -599,11 +606,19 @@ def run_once(
                 since_iso=since_iso,
             )
             logger.info("dry-run stage", stage=stage_name, command=cmd)
-            stage_metrics[stage_name] = {"status": "dry-run", "duration_sec": None, "records": None}
+            stage_metrics[stage_name] = {
+                "status": "dry-run",
+                "duration_sec": None,
+                "records": None,
+                "returncode": None,
+                "last_error": None,
+            }
             continue
 
         attempts = 0
         completed = False
+        last_error: Optional[str] = None
+        last_returncode: Optional[int] = None
         backoff = 30
         start_monotonic = time.monotonic()
         while attempts < max(1, stage_config.retries):
@@ -619,7 +634,7 @@ def run_once(
             )
             logger.info("stage command start", stage=stage_name, attempt=attempts, command=cmd)
             try:
-                completed = execute_command(
+                completed, attempt_error, attempt_returncode = execute_command(
                     cmd,
                     timeout=stage_config.timeout_sec,
                     logger=logger,
@@ -628,6 +643,10 @@ def run_once(
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("stage execution raised exception", stage=stage_name, error=str(exc))
                 completed = False
+                attempt_error = str(exc)
+                attempt_returncode = None
+            last_error = attempt_error
+            last_returncode = attempt_returncode
             if completed:
                 break
             if attempts < stage_config.retries:
@@ -644,6 +663,8 @@ def run_once(
                 "duration_sec": round(duration, 3),
                 "records": record_count,
                 "attempts": attempts,
+                "returncode": last_returncode if last_returncode is not None else 0,
+                "last_error": None,
             }
             logger.info(
                 "stage completed",
@@ -658,12 +679,17 @@ def run_once(
                 "duration_sec": round(duration, 3),
                 "records": None,
                 "attempts": attempts,
+                "returncode": last_returncode,
+                "last_error": last_error,
             }
             logger.error("stage failed after retries", stage=stage_name, attempts=attempts)
             success = False
             break
     for stage_name, _stage_config in stages:
-        stage_metrics.setdefault(stage_name, {"status": "pending", "duration_sec": None, "records": None})
+        stage_metrics.setdefault(
+            stage_name,
+            {"status": "pending", "duration_sec": None, "records": None, "returncode": None, "last_error": None},
+        )
 
     finished_at = datetime.now(timezone.utc)
     if not dry_run:
@@ -779,37 +805,53 @@ def build_stage_command(
     raise ValueError(f"Unknown stage: {stage_name}")
 
 
+def _format_stderr_tail(data: bytes, limit: int = 1024) -> tuple[Optional[str], str]:
+    if not data:
+        return None, "utf-8"
+    tail = data[-limit:] if limit > 0 else data
+    try:
+        text = tail.decode("utf-8")
+        return text, "utf-8"
+    except UnicodeDecodeError:
+        encoded = base64.b64encode(tail).decode("ascii")
+        return f"base64:{encoded}", "base64"
+
+
 def execute_command(
     cmd: list[str],
     *,
     timeout: Optional[int],
     logger: JsonLogger,
     stage: str,
-) -> bool:
+) -> tuple[bool, Optional[str], Optional[int]]:
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        stderr_bytes = exc.stderr or b""
+        tail, _ = _format_stderr_tail(stderr_bytes)
         logger.error(
             "stage command timed out",
             stage=stage,
             timeout_sec=timeout,
-            stderr=exc.stderr,
-            stdout=exc.stdout,
+            stderr=tail,
         )
-        return False
-    if proc.stdout:
-        logger.debug("stage stdout", stage=stage, stdout=proc.stdout)
-    if proc.stderr:
-        logger.debug("stage stderr", stage=stage, stderr=proc.stderr)
+        return False, tail or "timeout", None
+    stdout_text = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
+    stderr_text = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+    if stdout_text:
+        logger.debug("stage stdout", stage=stage, stdout=stdout_text)
+    if stderr_text:
+        logger.debug("stage stderr", stage=stage, stderr=stderr_text)
     if proc.returncode != 0:
-        logger.warn("stage command failed", stage=stage, returncode=proc.returncode)
-        return False
-    return True
+        tail, _ = _format_stderr_tail(proc.stderr or b"")
+        logger.warn("stage command failed", stage=stage, returncode=proc.returncode, stderr=tail)
+        return False, tail, proc.returncode
+    return True, None, proc.returncode
 
 
 def append_run_metrics(

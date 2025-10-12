@@ -288,6 +288,19 @@ class PartitionPaths:
             path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def pipeline_metrics_path(self, date: str | None = None, *, ensure_parent: bool = False) -> Path:
+        token_source = date if date else self.context.iso_date
+        token = token_source.strip() if isinstance(token_source, str) and token_source.strip() else self.context.iso_date
+        path = (
+            self.profile_root(ensure=ensure_parent)
+            / "metrics"
+            / "pipeline"
+            / f"pipeline_{token}.jsonl"
+        )
+        if ensure_parent:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 @dataclass(slots=True)
 class ContextPaths:
@@ -319,6 +332,9 @@ class ContextPaths:
     @classmethod
     def for_context(cls, context: ProfileContext) -> ContextPaths:
         return _cached_context_paths(context)
+
+    def pipeline_metrics_path(self, *, ensure_parent: bool = False) -> Path:
+        return self.partition_paths.pipeline_metrics_path(ensure_parent=ensure_parent)
 
 
 _CONTEXT_PATHS_CACHE: dict[Tuple[str, str, str], ContextPaths] = {}

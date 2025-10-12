@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 FIELDNAMES = [
     "guild_id",
     "channel_id",
+    "channel_name",
     "message_id",
     "message_link",
     "created_at",
     "author_id",
+    "author_name",
     "is_nsfw_channel",
     "source",
     "attachment_id",
@@ -446,6 +448,18 @@ class ScanRunner:
         urls = [url for url in url_candidates if url]
         if not urls:
             return
+        channel_name = getattr(destination, "name", None)
+        if channel_name is None:
+            parent = getattr(destination, "parent", None)
+            channel_name = getattr(parent, "name", None)
+        author = getattr(message, "author", None)
+        author_name = None
+        if author is not None:
+            author_name = getattr(author, "display_name", None) or getattr(author, "global_name", None)
+            if not author_name:
+                author_name = getattr(author, "name", None)
+            if not author_name and hasattr(author, "__str__"):
+                author_name = str(author)
         phash_hex = None
         used_url = None
         final_content_type = content_type
@@ -477,10 +491,12 @@ class ScanRunner:
         record = {
             "guild_id": str(guild.id),
             "channel_id": str(getattr(destination, "id", "")),
+            "channel_name": channel_name or "",
             "message_id": str(message.id),
             "message_link": self._build_message_link(guild.id, destination, message.id),
             "created_at": message.created_at.astimezone(timezone.utc).isoformat(),
             "author_id": str(message.author.id) if message.author else "",
+            "author_name": author_name or "",
             "is_nsfw_channel": str(self._is_nsfw(destination)).lower(),
             "source": source,
             "attachment_id": attachment_id,
