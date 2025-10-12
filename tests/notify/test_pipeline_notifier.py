@@ -40,6 +40,11 @@ if "pydantic_settings" not in sys.modules:  # pragma: no cover - dependency shim
     settings_stub.SettingsConfigDict = SettingsConfigDict
     sys.modules["pydantic_settings"] = settings_stub
 
+if "discord" not in sys.modules:  # pragma: no cover - provide minimal stub
+    sys.modules["discord"] = types.ModuleType("discord")
+
+pytest.importorskip("aiosqlite")
+
 from app.notify import NotificationConfig, NotificationRunner, NotificationState, load_notification_config
 from app.notify.pipeline_notifier import save_notification_state
 from app.profiles import ContextPaths, ProfileContext, clear_context_cache, set_profiles_root_override
@@ -200,6 +205,7 @@ def test_runner_sends_new_findings_and_updates_state(
         paths=paths,
         logger=logger,
         transport=transport,
+        findings_store_path=None,
     )
     try:
         success = runner.run()
@@ -249,6 +255,7 @@ def test_runner_keeps_pending_on_failure(
         paths=paths,
         logger=logger,
         transport=transport,
+        findings_store_path=None,
     )
     try:
         success = runner.run()
@@ -296,6 +303,7 @@ def test_pipeline_alert_sent_once_within_cooldown(
         paths=paths,
         logger=logger,
         transport=transport,
+        findings_store_path=None,
     )
     try:
         first = runner.run(only=["alerts"])

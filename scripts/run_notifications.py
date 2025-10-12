@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval-minutes", type=int, help="Loop interval override in minutes")
     parser.add_argument("--max-runs", type=int, help="Maximum runs when looping")
     parser.add_argument("--dry-run", action="store_true", help="Generate payloads without sending")
-    parser.add_argument("--only", action="append", choices=["findings", "alerts", "summary"], help="Limit notification categories")
+    parser.add_argument("--only", action="append", choices=["findings", "alerts", "summary", "store"], help="Limit notification categories")
     parser.add_argument("--log-file", type=Path, help="Optional JSON log output file")
     parser.add_argument("--quiet", action="store_true", help="Only emit WARN/ERROR logs to stdout")
     parser.add_argument("--verbose", action="store_true", help="Emit DEBUG logs to stdout")
@@ -197,6 +197,7 @@ def run_once(
         paths=paths,
         logger=logger,
         transport=transport,
+        findings_store_path=settings.findings_db_path,
     )
     try:
         success = runner.run(only=args.only or None, dry_run=args.dry_run)

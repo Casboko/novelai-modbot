@@ -28,6 +28,12 @@ p3:
   retries: 1
   merge_existing: true
 
+store:
+  enabled: true
+  retries: 1
+  timeout_sec: 900
+  extra_args: []
+
 report:
   enabled: true
   retries: 1

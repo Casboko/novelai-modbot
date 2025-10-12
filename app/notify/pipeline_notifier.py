@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -23,6 +24,7 @@ else:  # pragma: no cover - fallback type for type checking
 
 from ..config import get_settings
 from ..profiles import ContextPaths, PartitionPaths, ProfileContext
+from ..store import FindingsStore
 
 SEVERITY_ORDER = {"green": 0, "yellow": 1, "orange": 2, "red": 3}
 EMBED_COLORS = {
@@ -248,6 +250,8 @@ class NotificationState:
     last_findings_id: Optional[str] = None
     last_alert_at: Optional[datetime] = None
     last_alert_run_id: Optional[str] = None
+    last_store_run_id: Optional[str] = None
+    last_store_status: Optional[str] = None
     pending_notifications: list[dict[str, Any]] = field(default_factory=list)
     failure_count: int = 0
 
@@ -258,6 +262,8 @@ class NotificationState:
             "last_findings_id": self.last_findings_id,
             "last_alert_at": _format_iso(self.last_alert_at),
             "last_alert_run_id": self.last_alert_run_id,
+            "last_store_run_id": self.last_store_run_id,
+            "last_store_status": self.last_store_status,
             "pending_notifications": self.pending_notifications,
             "failure_count": self.failure_count,
         }
@@ -281,6 +287,8 @@ def load_notification_state(path: Path) -> NotificationState:
     state.last_findings_id = data.get("last_findings_id")
     state.last_alert_at = _parse_iso(data.get("last_alert_at"))
     state.last_alert_run_id = data.get("last_alert_run_id")
+    state.last_store_run_id = data.get("last_store_run_id")
+    state.last_store_status = data.get("last_store_status")
     pending = data.get("pending_notifications")
     if isinstance(pending, list):
         state.pending_notifications = [item for item in pending if isinstance(item, dict)]
@@ -535,6 +543,7 @@ class NotificationRunner:
         paths: ContextPaths,
         logger,
         transport: NotificationTransport,
+        findings_store_path: Path | None = None,
     ) -> None:
         self.config = config
         self.state = state
@@ -545,6 +554,8 @@ class NotificationRunner:
         self.transport = transport
         self.defaults = config.defaults
         self.state.profile = context.profile
+        self._findings_store_path = findings_store_path
+        self._findings_store: FindingsStore | None = None
 
     def run(
         self,
@@ -552,7 +563,7 @@ class NotificationRunner:
         only: Sequence[str] | None = None,
         dry_run: bool = False,
     ) -> bool:
-        categories = {entry.lower() for entry in (only or ["findings", "alerts"])}
+        categories = {entry.lower() for entry in (only or ["findings", "alerts", "store"])}
         success = True
         if not self._flush_pending(dry_run=dry_run):
             success = False
@@ -560,6 +571,8 @@ class NotificationRunner:
             success = self._process_findings(dry_run=dry_run) and success
         if "alerts" in categories:
             success = self._process_pipeline_alerts(dry_run=dry_run) and success
+        if "store" in categories:
+            success = self._process_store(dry_run=dry_run) and success
         if not dry_run:
             save_notification_state(self.state_path, self.state)
         return success
@@ -567,6 +580,25 @@ class NotificationRunner:
     def close(self) -> None:
         if hasattr(self.transport, "close"):
             self.transport.close()
+        if self._findings_store is not None:
+            try:
+                asyncio.run(self._findings_store.close())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self._findings_store.close())
+                finally:
+                    loop.close()
+            self._findings_store = None
+
+    def _get_findings_store(self) -> FindingsStore | None:
+        if self._findings_store_path is None:
+            return None
+        if self._findings_store is None:
+            store = FindingsStore(self._findings_store_path)
+            asyncio.run(store.connect())
+            self._findings_store = store
+        return self._findings_store
 
     def _flush_pending(self, *, dry_run: bool) -> bool:
         if not self.state.pending_notifications:
@@ -735,6 +767,79 @@ class NotificationRunner:
         if success and not dry_run:
             self.state.last_alert_at = finished_at or datetime.now(timezone.utc)
             self.state.last_alert_run_id = run_id
+        return success
+
+    def _process_store(self, *, dry_run: bool) -> bool:
+        store = self._get_findings_store()
+        if store is None:
+            self.logger.debug("store_db_unavailable")
+            return True
+        try:
+            runs = asyncio.run(store.fetch_recent_runs(limit=1))
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("store_fetch_failed", error=str(exc))
+            return False
+        if not runs:
+            return True
+        latest = runs[0]
+        if (
+            latest.run_id == self.state.last_store_run_id
+            and latest.status == self.state.last_store_status
+        ):
+            return True
+
+        metrics_payload = {}
+        if latest.metrics_json:
+            try:
+                metrics_payload = json.loads(latest.metrics_json)
+            except json.JSONDecodeError:
+                metrics_payload = {}
+
+        severity = "red" if latest.status != "success" else "green"
+        template_name = "store_error" if latest.status != "success" else "store_recovery"
+        jobs: list[NotificationJob] = []
+        for channel_key, channel in self.config.channels.items():
+            if channel.template != template_name:
+                continue
+            template = self.config.template_for(channel)
+            data = {
+                "store_run_id": latest.run_id,
+                "pipeline_run_id": latest.pipeline_run_id,
+                "profile": latest.profile,
+                "partition_date": latest.partition_date,
+                "status": latest.status,
+                "records_total": latest.records_total,
+                "records_upserted": latest.records_upserted,
+                "records_skipped": latest.records_skipped,
+                "duration_sec": latest.duration_sec,
+                "retry_count": latest.retry_count,
+                "db_size_bytes": latest.db_size_bytes,
+                "started_at": latest.started_at,
+                "finished_at": latest.finished_at,
+                "metrics": metrics_payload,
+            }
+            payload = self._build_payload(channel, template, data, severity=severity)
+            jobs.append(
+                NotificationJob(
+                    channel_key=channel_key,
+                    channel=channel,
+                    payload=payload,
+                    category="store",
+                    severity=severity,
+                    identifier=latest.run_id,
+                )
+            )
+
+        if not jobs:
+            if not dry_run:
+                self.state.last_store_run_id = latest.run_id
+                self.state.last_store_status = latest.status
+            return True
+
+        success = self._deliver(jobs, dry_run=dry_run)
+        if success and not dry_run:
+            self.state.last_store_run_id = latest.run_id
+            self.state.last_store_status = latest.status
         return success
 
     def _build_findings_template_data(self, record: dict, severity: str) -> Dict[str, Any]:

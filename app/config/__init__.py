@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     due_hours: int = 72
     ticket_db_path: Path = Field(default=Path("data/modbot.db"), alias="TICKET_DB_PATH")
     ticket_poll_interval: int = Field(default=300, ge=60, alias="TICKET_POLL_INTERVAL")
+    findings_db_path: Path = Field(default=Path("data/findings.db"), alias="FINDINGS_DB_PATH")
 
     # Locale defaults
     timezone: str = Field(default="Asia/Tokyo", alias="TZ")

@@ -136,6 +136,7 @@ class PipelineConfig:
     p1: StageOptions = field(default_factory=StageOptions)
     p2: StageOptions = field(default_factory=StageOptions)
     p3: StageOptions = field(default_factory=StageOptions)
+    store: StageOptions = field(default_factory=StageOptions)
     report: ReportOptions = field(default_factory=ReportOptions)
 
 
@@ -183,7 +184,7 @@ def load_pipeline_config(path: Path, logger: JsonLogger) -> PipelineConfig:
         raise SystemExit("Pipeline config must be a mapping at top level.")
 
     config = PipelineConfig()
-    unknown_keys = set(raw.keys()) - {"interval_minutes", "p0", "p1", "p2", "p3", "report"}
+    unknown_keys = set(raw.keys()) - {"interval_minutes", "p0", "p1", "p2", "p3", "store", "report"}
     if unknown_keys:
         logger.warn("unknown keys in pipeline config", keys=sorted(unknown_keys))
 
@@ -233,6 +234,7 @@ def load_pipeline_config(path: Path, logger: JsonLogger) -> PipelineConfig:
     config.p1 = parse_stage("p1", config.p1, control_keys=CONTROL_KEYS)
     config.p2 = parse_stage("p2", config.p2, control_keys=CONTROL_KEYS)
     config.p3 = parse_stage("p3", config.p3, control_keys=CONTROL_KEYS)
+    config.store = parse_stage("store", config.store, control_keys=CONTROL_KEYS)
 
     report_defaults = config.report
     payload_report = raw.get("report", {})
@@ -575,6 +577,7 @@ def run_once(
         ("p1", config.p1),
         ("p2", config.p2),
         ("p3", config.p3),
+        ("store", config.store),
         ("report", config.report),
     ]
 
@@ -604,6 +607,7 @@ def run_once(
                 profile=context.profile,
                 date_token=date_token,
                 since_iso=since_iso,
+                run_id=run_id,
             )
             logger.info("dry-run stage", stage=stage_name, command=cmd)
             stage_metrics[stage_name] = {
@@ -631,6 +635,7 @@ def run_once(
                 profile=context.profile,
                 date_token=date_token,
                 since_iso=since_iso,
+                run_id=run_id,
             )
             logger.info("stage command start", stage=stage_name, attempt=attempts, command=cmd)
             try:
@@ -733,6 +738,7 @@ def build_stage_command(
     profile: str,
     date_token: str,
     since_iso: str,
+    run_id: str | None = None,
 ) -> tuple[list[str], Path]:
     args_map = dict(stage_config.cli_args)
     extra_args = stage_config.extra_args
@@ -788,6 +794,22 @@ def build_stage_command(
         )
         output_path = context_paths.stage_file("p3", ensure_parent=True)
         return cmd, output_path
+
+    if stage_name == "store":
+        if run_id is None:
+            raise ValueError("run_id is required for store stage")
+        args_map.setdefault("--once", True)
+        args_map.setdefault("--pipeline-run-id", run_id)
+        metrics_path = partitions.metrics_file("store", ensure_parent=True)
+        args_map.setdefault("--metrics-file", metrics_path)
+        cmd = _build_stage_command(
+            module="scripts.run_store_sync",
+            profile=profile,
+            date_token=date_token,
+            args_map=args_map,
+            extra_args=extra_args,
+        )
+        return cmd, metrics_path
 
     if stage_name == "report":
         if isinstance(stage_config, ReportOptions) and stage_config.rules:

@@ -41,7 +41,7 @@ def get_profiles_root() -> Path:
 
     return _PROFILES_ROOT_OVERRIDE or PROFILES_ROOT
 
-StageName = Literal["p0", "p1", "p2", "p3"]
+StageName = Literal["p0", "p1", "p2", "p3", "store"]
 
 
 class ProfileError(RuntimeError):
@@ -77,6 +77,22 @@ _STAGE_FILE_TEMPLATES: dict[str, dict[str, str | Path]] = {
         "prefix": "findings_",
         "suffix": ".jsonl",
     },
+    "store": {
+        "dir": Path("p3"),
+        "filename": "store_sync_{date}.jsonl",
+        "glob": "store_sync_*.jsonl",
+        "prefix": "store_sync_",
+        "suffix": ".jsonl",
+    },
+}
+
+_METRICS_FILE_TEMPLATES: dict[str, dict[str, str | Path]] = {
+    "p0": {"dir": Path("metrics") / "p0", "filename": "p0_metrics_{date}.json"},
+    "p1": {"dir": Path("metrics") / "p1", "filename": "p1_metrics_{date}.json"},
+    "p2": {"dir": Path("metrics") / "p2", "filename": "p2_metrics_{date}.json"},
+    "p3": {"dir": Path("metrics") / "p3", "filename": "p3_metrics_{date}.json"},
+    "store": {"dir": Path("metrics") / "store", "filename": "store_run_{date}.jsonl"},
+    "report": {"dir": Path("metrics") / "report", "filename": "report_metrics_{date}.json"},
 }
 
 
@@ -243,12 +259,11 @@ class PartitionPaths:
         return path
 
     def metrics_file(self, stage: str, *, ensure_parent: bool = False) -> Path:
-        path = (
-            self.profile_root(ensure=ensure_parent)
-            / "metrics"
-            / stage
-            / f"{stage}_metrics_{self.context.iso_date}.json"
-        )
+        template = _METRICS_FILE_TEMPLATES.get(stage)
+        if template is None:
+            raise ProfileError(f"unknown metrics stage: {stage}")
+        filename = str(template["filename"]).format(date=self.context.iso_date, stage=stage)
+        path = self.profile_root(ensure=ensure_parent) / Path(template["dir"]) / filename
         if ensure_parent:
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
