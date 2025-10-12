@@ -1,0 +1,33 @@
+p0:
+  resume: true
+  since_fallback_minutes: 1440
+  retries: 2
+
+p1:
+  batch_size: 16
+  concurrency: 1
+  qps: 4
+  threads: 8
+  raw_general_topk: 256
+  rules_config: configs/rules.yaml
+  retries: 1
+  merge_existing: true
+
+p2:
+  batch_size: 16
+  concurrency: 1
+  qps: 4
+  buffered: true
+  nudenet_mode: always
+  rules_config: configs/rules.yaml
+  retries: 1
+  merge_existing: true
+
+p3:
+  rules: configs/rules_v2.yaml
+  retries: 1
+  merge_existing: true
+
+report:
+  enabled: true
+  retries: 1
